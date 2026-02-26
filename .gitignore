@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!ui/.env.development
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+nul
+.vscode/
+.idea/
+.claude/
+
+# Node / Vite
+ui/node_modules/
+ui/dist/
+ui/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python packaging / build artifacts
+gw/_frontend/
+dist/
+build/
+
+# Copilot run outputs
+runs/**/workspace/
+runs/**/run_artifacts/
+runs/imported/
+runs/**/stress_validation*.json
+runs/**/stress_validation*.md
