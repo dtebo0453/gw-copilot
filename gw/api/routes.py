@@ -196,6 +196,15 @@ def _build_cmd(action: str, req: RunRequest) -> list[str]:
     if config:
         cmd += ["--config", config]
 
+    # For LLM-backed commands, pass the active provider and model so the
+    # subprocess uses the same settings as the server.
+    if action == "suggest-fix":
+        from gw.api.llm_config import get_active_provider, get_model
+        cmd += ["--provider", get_active_provider()]
+        model = get_model()
+        if model:
+            cmd += ["--model", model]
+
     if req.out_dir:
         cmd += ["--out-dir", req.out_dir]
     if action == "apply-fixes":
@@ -530,13 +539,15 @@ def run_action(action: str, req: RunRequest):
                     "Ensure config.json exists in your inputs directory or workspace."
                 ),
             )
-        import os as _os
-        api_key = _os.environ.get("OPENAI_API_KEY", "")
+        from gw.api.llm_config import get_active_provider, get_api_key as _get_api_key
+        active_provider = get_active_provider()
+        api_key = _get_api_key(active_provider)
         if not api_key:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "OPENAI_API_KEY is not set on the server. "
+                    f"No API key configured for the active LLM provider ('{active_provider}'). "
+                    "Set your API key in the LLM Settings panel or via environment variables. "
                     "suggest-fix requires an LLM provider to analyze errors and propose fixes."
                 ),
             )

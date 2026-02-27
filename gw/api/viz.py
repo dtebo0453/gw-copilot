@@ -2018,254 +2018,6 @@ def _fetch_proj4_string(epsg: int) -> Optional[str]:
     return None
 
 
-def _compute_centroid_latlon(
-    epsg: int, xorigin: float, yorigin: float, angrot: float,
-    x_total: float, y_total: float
-) -> Optional[Tuple[float, float]]:
-    """Compute centroid lat/lon from model grid parameters.
-
-    Tries pyproj first (fast, no network), falls back to epsg.io + formula.
-    Returns (lat, lon) or None.
-    """
-    # Centroid in model-local coordinates
-    cx = x_total / 2.0
-    cy = y_total / 2.0
-    # Apply rotation
-    a = math.radians(angrot)
-    ca = math.cos(a)
-    sa = math.sin(a)
-    wx = xorigin + cx * ca - cy * sa
-    wy = yorigin + cx * sa + cy * ca
-
-    logger.info("_compute_centroid_latlon: EPSG:%s centroid_projected=(%.1f, %.1f)", epsg, wx, wy)
-
-    # Try pyproj first (preferred — no network needed)
-    try:
-        from pyproj import Transformer  # type: ignore
-        transformer = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
-        lon, lat = transformer.transform(wx, wy)
-        if -180 <= lon <= 180 and -90 <= lat <= 90:
-            logger.info("_compute_centroid_latlon: pyproj succeeded: lat=%.6f lon=%.6f", lat, lon)
-            return (float(lat), float(lon))
-    except Exception as exc:
-        logger.debug("_compute_centroid_latlon: pyproj not available: %s", exc)
-
-    # Fall back to epsg.io proj4 string + simple projection formula
-    try:
-        proj_str = _fetch_proj4_string(epsg)
-        if not proj_str:
-            logger.warning("_compute_centroid_latlon: could not get proj4 string for EPSG:%s", epsg)
-            return None
-
-        # Parse key proj4 params for manual transform
-        params: Dict[str, str] = {}
-        for token in proj_str.split():
-            if token.startswith("+") and "=" in token:
-                k, v = token[1:].split("=", 1)
-                params[k] = v
-
-        proj_type = params.get("proj", "")
-        logger.info("_compute_centroid_latlon: proj_type=%s units=%s", proj_type, params.get("units", "m"))
-
-        if proj_type == "utm":
-            zone = int(params.get("zone", "0"))
-            south = "+south" in proj_str
-            if zone < 1 or zone > 60:
-                return None
-            # UTM inverse formula (simplified via pyproj-less math)
-            # Use the standard UTM parameters
-            k0 = 0.9996
-            a_wgs = 6378137.0
-            f_wgs = 1 / 298.257223563
-            e2 = 2 * f_wgs - f_wgs ** 2
-            e_prime2 = e2 / (1 - e2)
-
-            # Convert from false easting/northing
-            lon0 = math.radians((zone - 1) * 6 - 180 + 3)
-
-            # Check units
-            units = params.get("units", "m")
-            x_m = wx
-            y_m = wy
-            if units == "us-ft":
-                x_m = wx * 0.3048006096012192
-                y_m = wy * 0.3048006096012192
-            elif units == "ft":
-                x_m = wx * 0.3048
-                y_m = wy * 0.3048
-
-            x_m -= 500000.0  # remove false easting
-            if south:
-                y_m -= 10000000.0  # remove false northing for southern hemisphere
-
-            M = y_m / k0
-            mu = M / (a_wgs * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
-
-            e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
-            phi1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu) + \
-                   (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * math.sin(4 * mu) + \
-                   (151 * e1 ** 3 / 96) * math.sin(6 * mu)
-
-            sin_phi1 = math.sin(phi1)
-            cos_phi1 = math.cos(phi1)
-            tan_phi1 = math.tan(phi1)
-            N1 = a_wgs / math.sqrt(1 - e2 * sin_phi1 ** 2)
-            T1 = tan_phi1 ** 2
-            C1 = e_prime2 * cos_phi1 ** 2
-            R1 = a_wgs * (1 - e2) / ((1 - e2 * sin_phi1 ** 2) ** 1.5)
-            D = x_m / (N1 * k0)
-
-            lat = phi1 - (N1 * tan_phi1 / R1) * (
-                D ** 2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * e_prime2) * D ** 4 / 24 +
-                (61 + 90 * T1 + 298 * C1 + 45 * T1 ** 2 - 252 * e_prime2 - 3 * C1 ** 2) * D ** 6 / 720
-            )
-            lon = lon0 + (
-                D - (1 + 2 * T1 + C1) * D ** 3 / 6 +
-                (5 - 2 * C1 + 28 * T1 - 3 * C1 ** 2 + 8 * e_prime2 + 24 * T1 ** 2) * D ** 5 / 120
-            ) / cos_phi1
-
-            lat_deg = math.degrees(lat)
-            lon_deg = math.degrees(lon)
-            if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
-                return (lat_deg, lon_deg)
-
-        elif proj_type == "tmerc":
-            # Transverse Mercator (State Plane etc.) — approximate inverse
-            # For non-UTM TM, we need lat_0, lon_0, k, x_0, y_0
-            lat_0 = math.radians(float(params.get("lat_0", "0")))
-            lon_0 = math.radians(float(params.get("lon_0", "0")))
-            k_0 = float(params.get("k", params.get("k_0", "1")))
-            x_0 = float(params.get("x_0", "0"))
-            y_0 = float(params.get("y_0", "0"))
-
-            units = params.get("units", "m")
-            x_m = wx
-            y_m = wy
-            if units == "us-ft":
-                x_m = wx * 0.3048006096012192
-                y_m = wy * 0.3048006096012192
-            elif units == "ft":
-                x_m = wx * 0.3048
-                y_m = wy * 0.3048
-
-            x_m -= x_0
-            y_m -= y_0
-
-            a_wgs = 6378137.0
-            f_wgs = 1 / 298.257223563
-            e2 = 2 * f_wgs - f_wgs ** 2
-            e_prime2 = e2 / (1 - e2)
-
-            # Footpoint latitude
-            M = y_m / k_0 + _meridional_arc(a_wgs, e2, lat_0)
-            mu = M / (a_wgs * (1 - e2 / 4 - 3 * e2 ** 2 / 64))
-            e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
-            phi1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu) + \
-                   (21 * e1 ** 2 / 16) * math.sin(4 * mu)
-
-            sin_phi1 = math.sin(phi1)
-            cos_phi1 = math.cos(phi1)
-            tan_phi1 = math.tan(phi1)
-            N1 = a_wgs / math.sqrt(1 - e2 * sin_phi1 ** 2)
-            R1 = a_wgs * (1 - e2) / ((1 - e2 * sin_phi1 ** 2) ** 1.5)
-            D = x_m / (N1 * k_0)
-            T1 = tan_phi1 ** 2
-
-            lat_deg = math.degrees(phi1 - (N1 * tan_phi1 / R1) * D ** 2 / 2)
-            lon_deg = math.degrees(lon_0 + D / cos_phi1)
-
-            if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
-                return (lat_deg, lon_deg)
-
-        elif proj_type == "lcc":
-            # Lambert Conformal Conic — full inverse projection
-            lat_0 = math.radians(float(params.get("lat_0", "0")))
-            lon_0 = math.radians(float(params.get("lon_0", "0")))
-            lat_1 = math.radians(float(params.get("lat_1", params.get("lat_0", "0"))))
-            lat_2 = math.radians(float(params.get("lat_2", params.get("lat_1", params.get("lat_0", "0")))))
-            x_0 = float(params.get("x_0", "0"))
-            y_0 = float(params.get("y_0", "0"))
-
-            units = params.get("units", "m")
-            x_m = wx
-            y_m = wy
-            if units == "us-ft":
-                x_m = wx * 0.3048006096012192
-                y_m = wy * 0.3048006096012192
-            elif units == "ft":
-                x_m = wx * 0.3048
-                y_m = wy * 0.3048
-
-            x_m -= x_0
-            y_m -= y_0
-
-            # Ellipsoid params — use GRS80 for NAD83 (nearly identical to WGS84)
-            a_e = 6378137.0
-            f_e = 1 / 298.257222101  # GRS80
-            ellps = params.get("ellps", "GRS80")
-            if ellps in ("WGS84", "wgs84"):
-                f_e = 1 / 298.257223563
-            e2 = 2 * f_e - f_e ** 2
-            e = math.sqrt(e2)
-
-            def _lcc_m(phi: float) -> float:
-                return math.cos(phi) / math.sqrt(1 - e2 * math.sin(phi) ** 2)
-
-            def _lcc_t(phi: float) -> float:
-                sp = e * math.sin(phi)
-                return math.tan(math.pi / 4 - phi / 2) / ((1 - sp) / (1 + sp)) ** (e / 2)
-
-            m1 = _lcc_m(lat_1)
-            m2 = _lcc_m(lat_2)
-            t0 = _lcc_t(lat_0)
-            t1 = _lcc_t(lat_1)
-            t2 = _lcc_t(lat_2)
-
-            if abs(lat_1 - lat_2) > 1e-10:
-                n = (math.log(m1) - math.log(m2)) / (math.log(t1) - math.log(t2))
-            else:
-                n = math.sin(lat_1)
-
-            F = m1 / (n * t1 ** n)
-            rho0 = a_e * F * t0 ** n
-
-            # Inverse
-            rho_sign = 1 if n > 0 else -1
-            x_s = rho_sign * x_m
-            y_s = rho_sign * (rho0 - y_m)
-            rho = rho_sign * math.sqrt(x_s ** 2 + y_s ** 2)
-            theta = math.atan2(x_s, y_s)
-
-            lon_deg = math.degrees(theta / n + lon_0)
-
-            if abs(rho) < 1e-10:
-                lat_deg = math.degrees(math.copysign(math.pi / 2, n))
-            else:
-                t = (rho / (a_e * F)) ** (1 / n)
-                # Iterative lat from t
-                phi = math.pi / 2 - 2 * math.atan(t)
-                for _ in range(10):
-                    sp = e * math.sin(phi)
-                    phi_new = math.pi / 2 - 2 * math.atan(t * ((1 - sp) / (1 + sp)) ** (e / 2))
-                    if abs(phi_new - phi) < 1e-12:
-                        break
-                    phi = phi_new
-                lat_deg = math.degrees(phi)
-
-            if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
-                return (lat_deg, lon_deg)
-
-        elif proj_type == "longlat":
-            # Already geographic
-            if -180 <= wx <= 180 and -90 <= wy <= 90:
-                return (wy, wx)
-
-    except Exception:
-        pass
-
-    return None
-
-
 def _meridional_arc(a: float, e2: float, phi: float) -> float:
     """Compute the meridional arc distance from equator to latitude phi."""
     e4 = e2 ** 2
@@ -2276,6 +2028,296 @@ def _meridional_arc(a: float, e2: float, phi: float) -> float:
         (15 * e4 / 256 + 45 * e6 / 1024) * math.sin(4 * phi) -
         (35 * e6 / 3072) * math.sin(6 * phi)
     )
+
+
+def _to_meters(val: float, units: str) -> float:
+    """Convert a value from CRS units to meters."""
+    if units == "us-ft":
+        return val * 0.3048006096012192
+    elif units == "ft":
+        return val * 0.3048
+    return val
+
+
+def _manual_inverse_projection(wx: float, wy: float, proj_str: str) -> Optional[Tuple[float, float]]:
+    """Inverse-project a single (x, y) in CRS coordinates to (lat, lon) WGS84.
+
+    Supports UTM, Transverse Mercator, Lambert Conformal Conic, and longlat.
+    Returns (lat_deg, lon_deg) or None.
+    """
+    params: Dict[str, str] = {}
+    for token in proj_str.split():
+        if token.startswith("+") and "=" in token:
+            k, v = token[1:].split("=", 1)
+            params[k] = v
+
+    proj_type = params.get("proj", "")
+    units = params.get("units", "m")
+
+    if proj_type == "utm":
+        zone = int(params.get("zone", "0"))
+        south = "+south" in proj_str
+        if zone < 1 or zone > 60:
+            return None
+        k0 = 0.9996
+        a_wgs = 6378137.0
+        f_wgs = 1 / 298.257223563
+        e2 = 2 * f_wgs - f_wgs ** 2
+        e_prime2 = e2 / (1 - e2)
+        lon0 = math.radians((zone - 1) * 6 - 180 + 3)
+
+        x_m = _to_meters(wx, units) - 500000.0
+        y_m = _to_meters(wy, units)
+        if south:
+            y_m -= 10000000.0
+
+        M = y_m / k0
+        mu = M / (a_wgs * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+        e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+        phi1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu) + \
+               (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * math.sin(4 * mu) + \
+               (151 * e1 ** 3 / 96) * math.sin(6 * mu)
+
+        sin_phi1 = math.sin(phi1)
+        cos_phi1 = math.cos(phi1)
+        tan_phi1 = math.tan(phi1)
+        N1 = a_wgs / math.sqrt(1 - e2 * sin_phi1 ** 2)
+        T1 = tan_phi1 ** 2
+        C1 = e_prime2 * cos_phi1 ** 2
+        R1 = a_wgs * (1 - e2) / ((1 - e2 * sin_phi1 ** 2) ** 1.5)
+        D = x_m / (N1 * k0)
+
+        lat = phi1 - (N1 * tan_phi1 / R1) * (
+            D ** 2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * e_prime2) * D ** 4 / 24 +
+            (61 + 90 * T1 + 298 * C1 + 45 * T1 ** 2 - 252 * e_prime2 - 3 * C1 ** 2) * D ** 6 / 720
+        )
+        lon = lon0 + (
+            D - (1 + 2 * T1 + C1) * D ** 3 / 6 +
+            (5 - 2 * C1 + 28 * T1 - 3 * C1 ** 2 + 8 * e_prime2 + 24 * T1 ** 2) * D ** 5 / 120
+        ) / cos_phi1
+
+        lat_deg = math.degrees(lat)
+        lon_deg = math.degrees(lon)
+        if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
+            return (lat_deg, lon_deg)
+
+    elif proj_type == "tmerc":
+        lat_0 = math.radians(float(params.get("lat_0", "0")))
+        lon_0 = math.radians(float(params.get("lon_0", "0")))
+        k_0 = float(params.get("k", params.get("k_0", "1")))
+        x_0 = float(params.get("x_0", "0"))
+        y_0 = float(params.get("y_0", "0"))
+
+        x_m = _to_meters(wx, units) - x_0
+        y_m = _to_meters(wy, units) - y_0
+
+        a_wgs = 6378137.0
+        f_wgs = 1 / 298.257223563
+        e2 = 2 * f_wgs - f_wgs ** 2
+
+        M = y_m / k_0 + _meridional_arc(a_wgs, e2, lat_0)
+        mu = M / (a_wgs * (1 - e2 / 4 - 3 * e2 ** 2 / 64))
+        e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+        phi1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu) + \
+               (21 * e1 ** 2 / 16) * math.sin(4 * mu)
+
+        sin_phi1 = math.sin(phi1)
+        cos_phi1 = math.cos(phi1)
+        tan_phi1 = math.tan(phi1)
+        N1 = a_wgs / math.sqrt(1 - e2 * sin_phi1 ** 2)
+        R1 = a_wgs * (1 - e2) / ((1 - e2 * sin_phi1 ** 2) ** 1.5)
+        D = x_m / (N1 * k_0)
+
+        lat_deg = math.degrees(phi1 - (N1 * tan_phi1 / R1) * D ** 2 / 2)
+        lon_deg = math.degrees(lon_0 + D / cos_phi1)
+
+        if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
+            return (lat_deg, lon_deg)
+
+    elif proj_type == "lcc":
+        lat_0 = math.radians(float(params.get("lat_0", "0")))
+        lon_0 = math.radians(float(params.get("lon_0", "0")))
+        lat_1 = math.radians(float(params.get("lat_1", params.get("lat_0", "0"))))
+        lat_2 = math.radians(float(params.get("lat_2", params.get("lat_1", params.get("lat_0", "0")))))
+        x_0 = float(params.get("x_0", "0"))
+        y_0 = float(params.get("y_0", "0"))
+
+        x_m = _to_meters(wx, units) - x_0
+        y_m = _to_meters(wy, units) - y_0
+
+        a_e = 6378137.0
+        f_e = 1 / 298.257222101  # GRS80
+        ellps = params.get("ellps", "GRS80")
+        if ellps in ("WGS84", "wgs84"):
+            f_e = 1 / 298.257223563
+        e2 = 2 * f_e - f_e ** 2
+        e = math.sqrt(e2)
+
+        def _lcc_m(phi: float) -> float:
+            return math.cos(phi) / math.sqrt(1 - e2 * math.sin(phi) ** 2)
+
+        def _lcc_t(phi: float) -> float:
+            sp = e * math.sin(phi)
+            return math.tan(math.pi / 4 - phi / 2) / ((1 - sp) / (1 + sp)) ** (e / 2)
+
+        m1 = _lcc_m(lat_1)
+        m2 = _lcc_m(lat_2)
+        t0 = _lcc_t(lat_0)
+        t1 = _lcc_t(lat_1)
+        t2 = _lcc_t(lat_2)
+
+        if abs(lat_1 - lat_2) > 1e-10:
+            n = (math.log(m1) - math.log(m2)) / (math.log(t1) - math.log(t2))
+        else:
+            n = math.sin(lat_1)
+
+        F = m1 / (n * t1 ** n)
+        rho0 = a_e * F * t0 ** n
+
+        rho_sign = 1 if n > 0 else -1
+        x_s = rho_sign * x_m
+        y_s = rho_sign * (rho0 - y_m)
+        rho = rho_sign * math.sqrt(x_s ** 2 + y_s ** 2)
+        theta = math.atan2(x_s, y_s)
+
+        lon_deg = math.degrees(theta / n + lon_0)
+
+        if abs(rho) < 1e-10:
+            lat_deg = math.degrees(math.copysign(math.pi / 2, n))
+        else:
+            t = (rho / (a_e * F)) ** (1 / n)
+            phi = math.pi / 2 - 2 * math.atan(t)
+            for _ in range(10):
+                sp = e * math.sin(phi)
+                phi_new = math.pi / 2 - 2 * math.atan(t * ((1 - sp) / (1 + sp)) ** (e / 2))
+                if abs(phi_new - phi) < 1e-12:
+                    break
+                phi = phi_new
+            lat_deg = math.degrees(phi)
+
+        if -180 <= lon_deg <= 180 and -90 <= lat_deg <= 90:
+            return (lat_deg, lon_deg)
+
+    elif proj_type == "longlat":
+        if -180 <= wx <= 180 and -90 <= wy <= 90:
+            return (wy, wx)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Public coordinate transform API
+# ---------------------------------------------------------------------------
+
+def model_xy_to_latlon(
+    x_model: float, y_model: float,
+    xorigin: float, yorigin: float, angrot: float,
+    epsg: int,
+) -> Optional[Tuple[float, float]]:
+    """Convert a model-local (x, y) point to WGS84 (lat, lon).
+
+    Steps:
+      1. Apply grid rotation to get projected (world) coordinates
+      2. Inverse-project from EPSG:epsg to EPSG:4326
+
+    Returns (lat, lon) or None if transform fails.
+    """
+    # Apply rotation
+    a = math.radians(angrot)
+    ca, sa = math.cos(a), math.sin(a)
+    wx = xorigin + x_model * ca - y_model * sa
+    wy = yorigin + x_model * sa + y_model * ca
+
+    # Try pyproj first (preferred — fast, no network)
+    try:
+        from pyproj import Transformer  # type: ignore
+        transformer = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+        lon, lat = transformer.transform(wx, wy)
+        if -180 <= lon <= 180 and -90 <= lat <= 90:
+            return (float(lat), float(lon))
+    except Exception:
+        pass
+
+    # Fall back to manual projection
+    try:
+        proj_str = _fetch_proj4_string(epsg)
+        if proj_str:
+            return _manual_inverse_projection(wx, wy, proj_str)
+    except Exception:
+        pass
+
+    return None
+
+
+def model_xy_to_latlon_batch(
+    points: List[Tuple[float, float]],
+    xorigin: float, yorigin: float, angrot: float,
+    epsg: int,
+) -> List[Optional[Tuple[float, float]]]:
+    """Batch-convert model-local (x, y) points to WGS84 (lat, lon).
+
+    More efficient than calling model_xy_to_latlon() in a loop when pyproj
+    is available (single vectorized transform call).
+
+    Returns a list of (lat, lon) tuples (or None for failed transforms),
+    one per input point.
+    """
+    if not points:
+        return []
+
+    # Apply rotation to all points
+    a = math.radians(angrot)
+    ca, sa = math.cos(a), math.sin(a)
+    world_pts = [
+        (xorigin + x * ca - y * sa, yorigin + x * sa + y * ca)
+        for x, y in points
+    ]
+
+    # Try pyproj batch transform
+    try:
+        from pyproj import Transformer  # type: ignore
+        transformer = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+        xs = [p[0] for p in world_pts]
+        ys = [p[1] for p in world_pts]
+        lons, lats = transformer.transform(xs, ys)
+        results: List[Optional[Tuple[float, float]]] = []
+        for lat, lon in zip(lats, lons):
+            if -180 <= lon <= 180 and -90 <= lat <= 90:
+                results.append((float(lat), float(lon)))
+            else:
+                results.append(None)
+        return results
+    except Exception:
+        pass
+
+    # Fall back to manual projection (one at a time)
+    try:
+        proj_str = _fetch_proj4_string(epsg)
+        if proj_str:
+            return [_manual_inverse_projection(wx, wy, proj_str) for wx, wy in world_pts]
+    except Exception:
+        pass
+
+    return [None] * len(points)
+
+
+def _compute_centroid_latlon(
+    epsg: int, xorigin: float, yorigin: float, angrot: float,
+    x_total: float, y_total: float
+) -> Optional[Tuple[float, float]]:
+    """Compute centroid lat/lon from model grid parameters.
+
+    Thin wrapper around model_xy_to_latlon() — passes the grid center point.
+    Returns (lat, lon) or None.
+    """
+    cx = x_total / 2.0
+    cy = y_total / 2.0
+    result = model_xy_to_latlon(cx, cy, xorigin, yorigin, angrot, epsg)
+    if result:
+        logger.info("_compute_centroid_latlon: EPSG:%s lat=%.6f lon=%.6f", epsg, result[0], result[1])
+    else:
+        logger.warning("_compute_centroid_latlon: transform failed for EPSG:%s", epsg)
+    return result
 
 
 def load_location_context(inputs_dir: str) -> Optional[Dict[str, Any]]:
@@ -2369,6 +2411,247 @@ def load_location_context(inputs_dir: str) -> Optional[Dict[str, Any]]:
         logger.warning("load_location_context: failed to persist: %s", exc)
 
     return loc
+
+
+# ---------------------------------------------------------------------------
+# Cell-level geospatial info (used by LLM lookup_cell_info tool)
+# ---------------------------------------------------------------------------
+
+def cell_info(
+    ws_root: Path,
+    inputs_dir: str,
+    cells: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return geospatial and property info for a list of grid cells.
+
+    Each entry in *cells* is a dict with 1-based indices:
+      - DIS:  {layer, row, col}
+      - DISV: {layer, cell_id}
+
+    Returns one result dict per cell with:
+      model_x, model_y, lat, lon, dx, dy, top, bottom, thickness,
+      idomain, properties, layer, row, col (or cell_id).
+
+    At most 20 cells per call.
+    """
+    if not cells:
+        return []
+    if len(cells) > 20:
+        cells = cells[:20]
+
+    grid_info, sess, dis_info = _get_session(ws_root)
+
+    # Load spatial ref for coordinate transforms
+    sr = _load_spatial_ref(inputs_dir) or {}
+    epsg = sr.get("epsg")
+
+    if grid_info.grid_type == GridType.DISU:
+        return [{"error": "Cell lookup is not yet supported for DISU grids"}]
+
+    # ---- DIS grid ----
+    if dis_info is not None and grid_info.grid_type == GridType.DIS:
+        nlay, nrow, ncol = dis_info.nlay, dis_info.nrow, dis_info.ncol
+        x_edges = np.concatenate(([0.0], np.cumsum(dis_info.delr)))
+        y_edges = np.concatenate(([0.0], np.cumsum(dis_info.delc)))
+        y_total = float(y_edges[-1])
+
+        top_2d = dis_info.top.reshape((nrow, ncol))
+        botm_3d = dis_info.botm.reshape((nlay, nrow, ncol))
+        idom_3d = dis_info.idomain.reshape((nlay, nrow, ncol)) if dis_info.idomain is not None else None
+
+        # Load property arrays (lazy, cached in session)
+        npf_arrays = _load_package_arrays(ws_root, dis_info, sess, "NPF")
+        sto_arrays = _load_package_arrays(ws_root, dis_info, sess, "STO")
+        ic_arrays = _load_package_arrays(ws_root, dis_info, sess, "IC")
+
+        # Reshape property arrays to 3D for indexing
+        def _reshape3d(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if arr is None:
+                return None
+            if arr.size == nlay * nrow * ncol:
+                return arr.reshape((nlay, nrow, ncol))
+            return None
+
+        k_3d = _reshape3d(npf_arrays.get("K") or npf_arrays.get("k"))
+        k33_3d = _reshape3d(npf_arrays.get("K33") or npf_arrays.get("k33"))
+        ss_3d = _reshape3d(sto_arrays.get("SS") or sto_arrays.get("ss"))
+        sy_3d = _reshape3d(sto_arrays.get("SY") or sto_arrays.get("sy"))
+        strt_3d = _reshape3d(ic_arrays.get("STRT") or ic_arrays.get("strt"))
+        icelltype_3d = _reshape3d(npf_arrays.get("ICELLTYPE") or npf_arrays.get("icelltype"))
+
+        # Collect model-local cell centers for batch transform
+        cell_results: List[Dict[str, Any]] = []
+        model_pts: List[Optional[Tuple[float, float]]] = []
+
+        for c in cells:
+            lay = int(c.get("layer", 1)) - 1   # 1-based → 0-based
+            row = int(c.get("row", 1)) - 1
+            col = int(c.get("col", 1)) - 1
+
+            # Bounds checking
+            errors = []
+            if lay < 0 or lay >= nlay:
+                errors.append(f"Layer {lay + 1} out of range (model has {nlay} layers)")
+            if row < 0 or row >= nrow:
+                errors.append(f"Row {row + 1} out of range (model has {nrow} rows)")
+            if col < 0 or col >= ncol:
+                errors.append(f"Col {col + 1} out of range (model has {ncol} columns)")
+
+            if errors:
+                cell_results.append({
+                    "layer": lay + 1, "row": row + 1, "col": col + 1,
+                    "error": "; ".join(errors),
+                })
+                model_pts.append(None)
+                continue
+
+            # Cell center in model-local coordinates
+            cx = float(x_edges[col] + dis_info.delr[col] / 2.0)
+            cy = y_total - float(y_edges[row] + dis_info.delc[row] / 2.0)
+            dx = float(dis_info.delr[col])
+            dy = float(dis_info.delc[row])
+
+            cell_top = float(top_2d[row, col]) if lay == 0 else float(botm_3d[lay - 1, row, col])
+            cell_bot = float(botm_3d[lay, row, col])
+            thickness = round(cell_top - cell_bot, 4)
+
+            idom_val = int(idom_3d[lay, row, col]) if idom_3d is not None else 1
+
+            # Gather properties
+            props: Dict[str, Any] = {}
+            if k_3d is not None:
+                props["k"] = round(float(k_3d[lay, row, col]), 6)
+            if k33_3d is not None:
+                props["k33"] = round(float(k33_3d[lay, row, col]), 6)
+            if ss_3d is not None:
+                props["ss"] = float(f"{ss_3d[lay, row, col]:.2e}")
+            if sy_3d is not None:
+                props["sy"] = round(float(sy_3d[lay, row, col]), 4)
+            if strt_3d is not None:
+                props["strt"] = round(float(strt_3d[lay, row, col]), 4)
+            if icelltype_3d is not None:
+                props["icelltype"] = int(icelltype_3d[lay, row, col])
+
+            result: Dict[str, Any] = {
+                "layer": lay + 1, "row": row + 1, "col": col + 1,
+                "model_x": round(cx, 2), "model_y": round(cy, 2),
+                "dx": round(dx, 2), "dy": round(dy, 2),
+                "top": round(cell_top, 4), "bottom": round(cell_bot, 4),
+                "thickness": thickness,
+                "idomain": idom_val,
+            }
+            if props:
+                result["properties"] = props
+            cell_results.append(result)
+            model_pts.append((cx, cy))
+
+        # Batch coordinate transform
+        if epsg:
+            xo = float(sr.get("xorigin", dis_info.xorigin))
+            yo = float(sr.get("yorigin", dis_info.yorigin))
+            ang = float(sr.get("angrot", dis_info.angrot))
+
+            # Collect only valid points for batch transform
+            valid_indices = [i for i, p in enumerate(model_pts) if p is not None]
+            valid_pts = [model_pts[i] for i in valid_indices]
+
+            if valid_pts:
+                latlons = model_xy_to_latlon_batch(valid_pts, xo, yo, ang, epsg)
+                for idx, ll in zip(valid_indices, latlons):
+                    if ll:
+                        cell_results[idx]["lat"] = round(ll[0], 6)
+                        cell_results[idx]["lon"] = round(ll[1], 6)
+                    else:
+                        cell_results[idx]["lat"] = None
+                        cell_results[idx]["lon"] = None
+        else:
+            # No CRS — mark lat/lon as unavailable
+            for i, p in enumerate(model_pts):
+                if p is not None:
+                    cell_results[i]["lat"] = None
+                    cell_results[i]["lon"] = None
+
+        # Add CRS info to first result
+        if cell_results and not cell_results[0].get("error"):
+            crs_info: Dict[str, Any] = {}
+            if epsg:
+                crs_info["epsg"] = epsg
+                crs_info["crs_name"] = sr.get("crs_name", f"EPSG:{epsg}")
+            crs_info["units"] = "us-ft" if "us-ft" in str(sr) else ("ft" if "ft" in str(sr) else "m")
+            cell_results[0]["crs"] = crs_info
+
+        return cell_results
+
+    # ---- DISV grid (FloPy required) ----
+    if grid_info.grid_type == GridType.DISV and sess.flopy_sim is not None:
+        try:
+            model = sess.flopy_sim.get_model(sess.flopy_model_name)
+            mg = model.modelgrid
+            xc = mg.xcellcenters
+            yc = mg.ycellcenters
+
+            cell_results = []
+            model_pts = []
+
+            for c in cells:
+                lay = int(c.get("layer", 1)) - 1
+                cid = int(c.get("cell_id", 1)) - 1
+
+                errors = []
+                if lay < 0 or lay >= grid_info.nlay:
+                    errors.append(f"Layer {lay + 1} out of range (model has {grid_info.nlay} layers)")
+                if cid < 0 or cid >= grid_info.ncpl:
+                    errors.append(f"Cell {cid + 1} out of range (model has {grid_info.ncpl} cells per layer)")
+
+                if errors:
+                    cell_results.append({
+                        "layer": lay + 1, "cell_id": cid + 1,
+                        "error": "; ".join(errors),
+                    })
+                    model_pts.append(None)
+                    continue
+
+                cx = float(xc[cid]) if xc.ndim == 1 else float(xc[0, cid])
+                cy = float(yc[cid]) if yc.ndim == 1 else float(yc[0, cid])
+
+                # Get top/bottom from model dis package
+                try:
+                    dis_pkg = model.get_package("DISV")
+                    top_arr = dis_pkg.top.array
+                    botm_arr = dis_pkg.botm.array
+                    cell_top = float(top_arr[cid]) if lay == 0 else float(botm_arr[lay - 1, cid])
+                    cell_bot = float(botm_arr[lay, cid])
+                except Exception:
+                    cell_top = 0.0
+                    cell_bot = 0.0
+
+                result = {
+                    "layer": lay + 1, "cell_id": cid + 1,
+                    "model_x": round(cx, 2), "model_y": round(cy, 2),
+                    "top": round(cell_top, 4), "bottom": round(cell_bot, 4),
+                    "thickness": round(cell_top - cell_bot, 4),
+                }
+                cell_results.append(result)
+                model_pts.append((cx, cy))
+
+            # Batch transform
+            if epsg:
+                xo = float(sr.get("xorigin", grid_info.xorigin))
+                yo = float(sr.get("yorigin", grid_info.yorigin))
+                ang = float(sr.get("angrot", grid_info.angrot))
+                valid_indices = [i for i, p in enumerate(model_pts) if p is not None]
+                valid_pts = [model_pts[i] for i in valid_indices]
+                if valid_pts:
+                    latlons = model_xy_to_latlon_batch(valid_pts, xo, yo, ang, epsg)
+                    for idx, ll in zip(valid_indices, latlons):
+                        cell_results[idx]["lat"] = round(ll[0], 6) if ll else None
+                        cell_results[idx]["lon"] = round(ll[1], 6) if ll else None
+
+            return cell_results
+        except Exception as exc:
+            return [{"error": f"DISV cell lookup failed: {type(exc).__name__}: {exc}"}]
+
+    return [{"error": "Could not load grid session for cell lookup"}]
 
 
 @router.get("/viz/spatial-ref")

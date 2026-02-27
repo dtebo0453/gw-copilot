@@ -13,7 +13,7 @@ type Props = {
 
 type ActionLabel = "revalidate" | "validate" | "suggest-fix" | "apply-fixes";
 
-const QUICK_ACTIONS: ActionLabel[] = ["revalidate", "validate", "suggest-fix"];
+const QUICK_ACTIONS: ActionLabel[] = ["revalidate", "validate"];
 
 function inferQuick(text: string): ActionLabel | null {
   const t = (text || "").toLowerCase().trim();
@@ -21,7 +21,6 @@ function inferQuick(text: string): ActionLabel | null {
   if (QUICK_ACTIONS.includes(token as ActionLabel)) return token as ActionLabel;
 
   if (t.includes("revalidate")) return "revalidate";
-  if (t.includes("suggest") && t.includes("fix")) return "suggest-fix";
   if (t.includes("apply") && t.includes("fix")) return "apply-fixes";
   if (t.includes("validate")) return "validate";
   return null;
@@ -164,8 +163,13 @@ type AiChip =
   | { label: string; icon: string; message: string; action?: undefined; isRunQuick?: undefined };
 
 const AI_CHIPS: AiChip[] = [
-  // Suggest Fix uses runQuick (CLI subprocess) but internally calls an LLM
-  { label: "Suggest Fix", action: "suggest-fix" as ActionLabel, icon: "🔧", isRunQuick: true },
+  // Suggest Fix — routed through the LLM /chat endpoint so it can use conversation
+  // context (e.g. a preceding QA review) to produce actionable fix suggestions.
+  {
+    label: "Suggest Fix",
+    icon: "🔧",
+    message: "Based on the QA findings above, suggest specific fixes for this MODFLOW model. For each issue, describe what to change, which files or packages are affected, and the expected impact.",
+  },
   // QA / analysis chips — send a pre-written message to the LLM /chat endpoint
   {
     label: "QA Overview",

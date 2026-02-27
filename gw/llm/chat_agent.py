@@ -1154,6 +1154,75 @@ def _build_context(
                 logger.warning("_build_context: no location context available for inputs_dir=%s",
                               inputs_dir)
 
+            # Inject spatial extent details (bounding box, grid resolution, elevation range)
+            try:
+                import numpy as _np
+                from gw.api.viz import _get_session, model_xy_to_latlon_batch, _load_spatial_ref
+
+                _grid_info, _sess, _dis_info = _get_session(ws_root)
+                _sr = _load_spatial_ref(inputs_dir) or {}
+                _epsg = _sr.get("epsg") or (loc_ctx or {}).get("epsg")
+
+                if _dis_info is not None:
+                    x_total = float(_np.sum(_dis_info.delr))
+                    y_total = float(_np.sum(_dis_info.delc))
+                    avg_dx = float(_np.mean(_dis_info.delr))
+                    avg_dy = float(_np.mean(_dis_info.delc))
+                    min_dx = float(_np.min(_dis_info.delr))
+                    max_dx = float(_np.max(_dis_info.delr))
+
+                    valid_top = _dis_info.top[_np.isfinite(_dis_info.top)]
+                    valid_botm = _dis_info.botm[_np.isfinite(_dis_info.botm)]
+                    top_min = float(_np.min(valid_top)) if valid_top.size else 0
+                    top_max = float(_np.max(valid_top)) if valid_top.size else 0
+                    botm_min = float(_np.min(valid_botm)) if valid_botm.size else 0
+                    botm_max = float(_np.max(valid_botm)) if valid_botm.size else 0
+
+                    # Determine units from CRS name
+                    _crs_name = _sr.get("crs_name", "")
+                    _units = "feet" if any(u in _crs_name.lower() for u in ["ft", "feet", "us-ft"]) else "meters"
+
+                    spatial_text = "MODEL SPATIAL EXTENT:\n"
+                    spatial_text += f"- Grid: {_dis_info.nrow} rows x {_dis_info.ncol} cols x {_dis_info.nlay} layers\n"
+                    spatial_text += f"- Total extent: {x_total:.1f} x {y_total:.1f} {_units}\n"
+                    spatial_text += f"- Cell size: avg {avg_dx:.1f} x {avg_dy:.1f} {_units}"
+                    if abs(max_dx - min_dx) > 0.01 * avg_dx:
+                        spatial_text += f" (range: {min_dx:.1f}-{max_dx:.1f})"
+                    spatial_text += "\n"
+                    spatial_text += f"- Elevation: top {top_min:.1f} to {top_max:.1f}, bottom {botm_min:.1f} to {botm_max:.1f} {_units}\n"
+
+                    if _epsg:
+                        spatial_text += f"- CRS: EPSG:{_epsg} ({_crs_name}), units: {_units}\n"
+
+                        # Compute bounding box corners in lat/lon
+                        corners = [
+                            (0.0, 0.0),            # SW
+                            (x_total, 0.0),         # SE
+                            (x_total, y_total),     # NE
+                            (0.0, y_total),         # NW
+                        ]
+                        _xo = float(_sr.get("xorigin", _dis_info.xorigin))
+                        _yo = float(_sr.get("yorigin", _dis_info.yorigin))
+                        _ang = float(_sr.get("angrot", _dis_info.angrot))
+                        corner_lls = model_xy_to_latlon_batch(corners, _xo, _yo, _ang, _epsg)
+
+                        if all(c is not None for c in corner_lls):
+                            lats = [c[0] for c in corner_lls]
+                            lons = [c[1] for c in corner_lls]
+                            spatial_text += (
+                                f"- Bounding box (lat/lon): "
+                                f"SW({min(lats):.4f}, {min(lons):.4f}) "
+                                f"NE({max(lats):.4f}, {max(lons):.4f})\n"
+                            )
+
+                    spatial_text += (
+                        "- Use the lookup_cell_info tool to get the exact lat/lon and "
+                        "properties of any specific cell.\n"
+                    )
+                    model_facts_text += spatial_text + "\n"
+            except Exception as _exc:
+                logger.debug("_build_context: spatial extent enrichment failed: %s", _exc)
+
             try:
                 scan = ensure_workspace_scan(ws_root, force=False)
 
@@ -1316,7 +1385,8 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
         "- read_binary_output(path) — Extract numerical data from .hds or .cbc files\n"
         "- list_files(pattern?) — List workspace files matching a glob pattern\n"
         "- generate_plot(prompt, script?) — Generate a plot from workspace data\n"
-        "- run_qa_check(check_name) — Run specialized QA/QC diagnostic checks\n\n"
+        "- run_qa_check(check_name) — Run specialized QA/QC diagnostic checks\n"
+        "- lookup_cell_info(cells) — Get lat/lon, elevations, and properties of specific grid cells\n\n"
         "Use these tools when:\n"
         "- You need data from a file not already in your context\n"
         "- The user asks for a plot or visualization\n"
@@ -1397,6 +1467,21 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
         "When the user asks about geology, site conditions, or parameter reasonableness,\n"
         "use those coordinates to identify the region and provide site-specific context.\n"
         "NEVER say you don't know the location if coordinates are provided.\n\n"
+
+        "GEOSPATIAL CELL LOOKUP:\n"
+        "When you need to understand the real-world location of a specific grid cell,\n"
+        "or need cell-level property values, use the lookup_cell_info tool.\n"
+        "Provide cell indices (1-based: layer, row, col for DIS; layer, cell_id for DISV).\n"
+        "The tool returns WGS84 lat/lon, model coordinates, cell dimensions, elevations,\n"
+        "active/inactive status, and aquifer properties (K, K33, Ss, Sy where available).\n"
+        "You can query up to 20 cells at once — useful for transects or well neighborhoods.\n"
+        "After receiving lat/lon coordinates, use your knowledge to identify the local\n"
+        "geology, aquifer systems, hydrogeological setting, and site conditions.\n"
+        "Examples of when to use this tool:\n"
+        "- User asks 'where is this well located?' → look up the well's cell\n"
+        "- User asks about geology at a specific location → look up cell, get lat/lon, describe geology\n"
+        "- User wants to compare K values across a row → batch query multiple cells\n"
+        "- User asks about property values at a specific cell → direct lookup\n\n"
 
         "DETERMINISTIC SPINE (the only hard constraints):\n"
         "- You do NOT modify files directly. For changes, respond with:\n"

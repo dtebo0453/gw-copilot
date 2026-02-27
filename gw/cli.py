@@ -405,13 +405,25 @@ def llm_suggest_fixes_cmd(
         None,
         help="Path to stress_validation_report.md (default: <workspace>/run_artifacts/stress_validation_report.md).",
     ),
-    provider: str = typer.Option("openai", help="LLM provider name."),
-    model: str = typer.Option(None, help="Model override."),
+    provider: str = typer.Option(None, help="LLM provider name (default: from saved config or 'openai')."),
+    model: str = typer.Option(None, help="Model override (default: from saved config)."),
     outpath: str = typer.Option(
         None,
         help="Where to write fix_plan.json (default: alongside report).",
     ),
 ):
+    # Resolve provider/model from user's saved LLM config when not explicit
+    if not provider or not model:
+        try:
+            from gw.api.llm_config import get_active_provider, get_model
+            if not provider:
+                provider = get_active_provider()
+            if not model:
+                model = get_model()
+        except Exception:
+            pass
+    provider = provider or "openai"
+
     cfg = json.loads(Path(config).read_text(encoding="utf-8"))
     ws_raw = cfg.get("workspace") or "."
     # Resolve workspace relative to the config file's directory if it's relative

@@ -8,11 +8,12 @@ extraction, directory listing), trigger plot generation, and run QA/QC
 diagnostic checks.
 
 Supported tools:
-  - read_file         — Read any text file from the workspace
+  - read_file          — Read any text file from the workspace
   - read_binary_output — Extract numerical data from HDS/CBC via FloPy
-  - list_files        — List workspace files matching an optional glob pattern
-  - generate_plot     — Generate a plot in the sandbox (reuses plots.py infra)
-  - run_qa_check      — Run specialized QA/QC diagnostics (mass balance, dry cells, etc.)
+  - list_files         — List workspace files matching an optional glob pattern
+  - generate_plot      — Generate a plot in the sandbox (reuses plots.py infra)
+  - run_qa_check       — Run specialized QA/QC diagnostics (mass balance, dry cells, etc.)
+  - lookup_cell_info   — Get lat/lon, properties, and elevations of specific grid cells
 
 Provider-specific implementations:
   - Anthropic: uses client.messages.create(tools=[...]) with tool_use / tool_result
@@ -181,6 +182,49 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "required": ["check_name"],
         },
     },
+    {
+        "name": "lookup_cell_info",
+        "description": (
+            "Look up the real-world location and properties of specific grid cells. "
+            "Returns lat/lon (WGS84), model coordinates, cell dimensions, elevations, "
+            "active/inactive status, and aquifer properties (K, K33, Ss, Sy) for each cell.\n\n"
+            "For DIS grids: provide layer, row, col (all 1-based).\n"
+            "For DISV grids: provide layer, cell_id (1-based).\n\n"
+            "You can query up to 20 cells at once. Use this tool when:\n"
+            "- You need the real-world location of cells (e.g., where a well is)\n"
+            "- You want to understand what geological formation a cell might be in\n"
+            "- You need cell-level property values for specific locations\n"
+            "- You want to compare properties across a transect or neighborhood\n\n"
+            "After receiving lat/lon coordinates, use your training knowledge to identify "
+            "the local geology, aquifer systems, hydrogeological setting, and relevant "
+            "site conditions at those coordinates."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cells": {
+                    "type": "array",
+                    "description": (
+                        "List of cells to look up. Each cell is an object with "
+                        "'layer' (required, 1-based), plus 'row' and 'col' (DIS grids, 1-based) "
+                        "or 'cell_id' (DISV grids, 1-based). Maximum 20 cells."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "layer": {"type": "integer", "description": "Layer number (1-based)"},
+                            "row": {"type": "integer", "description": "Row number (1-based, DIS grids)"},
+                            "col": {"type": "integer", "description": "Column number (1-based, DIS grids)"},
+                            "cell_id": {"type": "integer", "description": "Cell ID (1-based, DISV grids)"},
+                        },
+                        "required": ["layer"],
+                    },
+                    "maxItems": 20,
+                },
+            },
+            "required": ["cells"],
+        },
+    },
 ]
 
 
@@ -239,6 +283,8 @@ def _execute_tool(
             )
         elif name == "run_qa_check":
             return _tool_run_qa_check(args, ws_root=ws_root)
+        elif name == "lookup_cell_info":
+            return _tool_lookup_cell_info(args, ws_root=ws_root, inputs_dir=inputs_dir)
         else:
             return {"ok": False, "error": f"Unknown tool: {name}"}
     except Exception as e:
@@ -375,6 +421,32 @@ def _tool_run_qa_check(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]
         }
     except Exception as e:
         return {"ok": False, "error": f"QA check failed: {type(e).__name__}: {e}"}
+
+
+def _tool_lookup_cell_info(
+    args: Dict[str, Any],
+    *,
+    ws_root: Path,
+    inputs_dir: str,
+) -> Dict[str, Any]:
+    """Look up geospatial info and properties for specific grid cells."""
+    from gw.api.viz import cell_info
+
+    cells = args.get("cells", [])
+    if not cells:
+        return {"ok": False, "error": "No cells specified. Provide a 'cells' array."}
+    if not isinstance(cells, list):
+        return {"ok": False, "error": "'cells' must be an array of cell objects."}
+
+    try:
+        results = cell_info(ws_root, inputs_dir, cells)
+        return {
+            "ok": True,
+            "cell_count": len(results),
+            "cells": results,
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"Cell lookup failed: {type(e).__name__}: {e}"}
 
 
 def _tool_generate_plot(
