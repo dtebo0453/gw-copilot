@@ -184,11 +184,22 @@ Facts are automatically injected into the chat context so the LLM's responses ar
 
 ### Screenshots
 <img width="562" height="710" alt="Welcome" src="https://github.com/user-attachments/assets/33372016-26ec-4bec-b83e-e35077ef0d20" />
-<img width="1891" height="976" alt="Plots" src="https://github.com/user-attachments/assets/4095d2a2-2f5f-47e3-89cf-adc0d224d367" />
-<img width="1891" height="974" alt="Model_Files" src="https://github.com/user-attachments/assets/df27f5d5-52bf-4483-a3d4-43c32e15d1cc" />
+**The welcome screen to select model files folder and set LLM API.**
+
 <img width="544" height="701" alt="LLM_Settings" src="https://github.com/user-attachments/assets/14eb9afa-26fd-4ef6-8194-5a64888ebeea" />
+**Screen where the API Token is set.**
+
 <img width="1892" height="977" alt="Copilot_ex1" src="https://github.com/user-attachments/assets/f99a4651-550a-4153-9bc0-76f4a42cfbe0" />
+**Example of Copilot answer from a user request in the chatbox.**
+
 <img width="1892" height="974" alt="3D_Viewer" src="https://github.com/user-attachments/assets/2146051c-164c-463f-88dd-c57682e8f8aa" />
+**3D viewer example.**
+
+<img width="1891" height="974" alt="Model_Files" src="https://github.com/user-attachments/assets/df27f5d5-52bf-4483-a3d4-43c32e15d1cc" />
+**Model File viewer example.**
+
+<img width="1891" height="976" alt="Plots" src="https://github.com/user-attachments/assets/4095d2a2-2f5f-47e3-89cf-adc0d224d367" />
+**Example of plot generator showing the promp, Python script and figure auto-generated from promp using Python Script.**
 
 
 ## Tech Stack
