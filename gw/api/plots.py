@@ -37,6 +37,81 @@ from gw.api.workspace_scan import ensure_workspace_scan
 from gw.llm.read_router import llm_route_read_plan, execute_read_plan
 from gw.api.workspace_state import load_workspace_state, workspace_state_summary
 
+from typing import TYPE_CHECKING as _TC
+if _TC:
+    from gw.simulators.base import SimulatorAdapter
+
+
+def _resolve_adapter(ws_root: Path) -> "Optional[SimulatorAdapter]":
+    """Try to resolve the simulator adapter for the workspace; return None on failure."""
+    try:
+        from gw.api.simulator_config import get_adapter_for_workspace
+        return get_adapter_for_workspace(ws_root)
+    except Exception:
+        return None
+
+
+def _probe_workspace_outputs_via_adapter(
+    adapter: "Optional[SimulatorAdapter]",
+    ws_root: Path,
+    file_index: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Probe binary outputs using adapter when available, else fall back to direct import."""
+    if adapter is not None:
+        result: Dict[str, Any] = {}
+        for f in (file_index.get("files") or []):
+            if not isinstance(f, dict):
+                continue
+            p = (f.get("path") or "").strip()
+            if not p:
+                continue
+            ext = p.rsplit(".", 1)[-1].lower() if "." in p else ""
+            if ext == "hds" and "hds" not in result:
+                result["hds"] = adapter.probe_head_file(ws_root, p)
+            elif ext == "cbc" and "cbc" not in result:
+                result["cbc"] = adapter.probe_budget_file(ws_root, p)
+        return result
+    # Fallback
+    from gw.api.output_probes import probe_workspace_outputs
+    return probe_workspace_outputs(ws_root, file_index)
+
+
+def _extract_binary_summaries(
+    adapter: "Optional[SimulatorAdapter]",
+    ws_root: Path,
+    file_index: Dict[str, Any],
+    *,
+    max_hds_times: int = 3,
+    max_hds_chars: int = 6000,
+    max_cbc_records: int = 6,
+    max_cbc_chars: int = 6000,
+) -> Dict[str, Any]:
+    """Extract binary data summaries using adapter when available, else fall back."""
+    summary: Dict[str, Any] = {}
+    for fpath in sorted(file_index.keys()):
+        ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
+        if ext == "hds" and "hds" not in summary:
+            if adapter is not None:
+                result = adapter.extract_head_data(
+                    ws_root, fpath, max_times=max_hds_times, max_chars=max_hds_chars,
+                )
+            else:
+                from gw.api.output_probes import extract_hds_data
+                result = extract_hds_data(ws_root, fpath, max_times=max_hds_times, max_chars=max_hds_chars)
+            if result.get("ok"):
+                summary["hds"] = result["summary_text"]
+        elif ext == "cbc" and "cbc" not in summary:
+            if adapter is not None:
+                result = adapter.extract_budget_data(
+                    ws_root, fpath, max_records=max_cbc_records, max_chars=max_cbc_chars,
+                )
+            else:
+                from gw.api.output_probes import extract_cbc_data
+                result = extract_cbc_data(ws_root, fpath, max_records=max_cbc_records, max_chars=max_cbc_chars)
+            if result.get("ok"):
+                summary["cbc"] = result["summary_text"]
+    return summary
+
 router = APIRouter()
 
 
@@ -1436,19 +1511,13 @@ def plots_plan_agentic(payload: Dict[str, Any]):
     compact_files = sorted(list(file_index.keys()))[:1200]
 
     # Binary data summaries so agent can validate data ranges
+    _adapter = _resolve_adapter(ws_root)
     binary_data_summary: Dict[str, Any] = {}
     try:
-        from gw.api.output_probes import extract_hds_data, extract_cbc_data
-        for fpath in sorted(file_index.keys()):
-            ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
-            if ext == "hds" and "hds" not in binary_data_summary:
-                result = extract_hds_data(ws_root, fpath, max_times=3, max_chars=6000)
-                if result.get("ok"):
-                    binary_data_summary["hds"] = result["summary_text"]
-            elif ext == "cbc" and "cbc" not in binary_data_summary:
-                result = extract_cbc_data(ws_root, fpath, max_records=6, max_chars=6000)
-                if result.get("ok"):
-                    binary_data_summary["cbc"] = result["summary_text"]
+        binary_data_summary = _extract_binary_summaries(
+            _adapter, ws_root, file_index,
+            max_hds_times=3, max_hds_chars=6000, max_cbc_records=6, max_cbc_chars=6000,
+        )
     except Exception:
         pass
 
@@ -1671,7 +1740,8 @@ def plots_plan(payload: Dict[str, Any]):
         }
         plan = llm_route_read_plan(question=prompt, router_context=router_ctx)
         if plan and isinstance(plan, dict):
-            router_reads_ctx = execute_read_plan(ws_root=ws_root, scan=scan, plan=plan)
+            router_reads_ctx = execute_read_plan(ws_root=ws_root, scan=scan, plan=plan,
+                                                  adapter=_resolve_adapter(ws_root))
     except Exception:
         router_reads_ctx = None
 
@@ -1780,11 +1850,11 @@ def plots_plan(payload: Dict[str, Any]):
     # Compact file list instead of full file index to save tokens
     compact_files = sorted(list(file_index.keys()))[:1200]
 
-    # Probe binary outputs for LLM context
+    # Probe binary outputs for LLM context (adapter-aware)
+    _adapter = _resolve_adapter(ws_root)
     output_probes = None
     try:
-        from gw.api.output_probes import probe_workspace_outputs
-        output_probes = probe_workspace_outputs(ws_root, file_index)
+        output_probes = _probe_workspace_outputs_via_adapter(_adapter, ws_root, file_index)
     except Exception:
         pass
 
@@ -1793,18 +1863,10 @@ def plots_plan(payload: Dict[str, Any]):
     # planner previously only got metadata probes).
     binary_data_summary: Dict[str, Any] = {}
     try:
-        from gw.api.output_probes import extract_hds_data, extract_cbc_data
-
-        for fpath in sorted(file_index.keys()):
-            ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
-            if ext == "hds" and "hds" not in binary_data_summary:
-                result = extract_hds_data(ws_root, fpath, max_times=3, max_chars=8000)
-                if result.get("ok"):
-                    binary_data_summary["hds"] = result["summary_text"]
-            elif ext == "cbc" and "cbc" not in binary_data_summary:
-                result = extract_cbc_data(ws_root, fpath, max_records=6, max_chars=8000)
-                if result.get("ok"):
-                    binary_data_summary["cbc"] = result["summary_text"]
+        binary_data_summary = _extract_binary_summaries(
+            _adapter, ws_root, file_index,
+            max_hds_times=3, max_hds_chars=8000, max_cbc_records=6, max_cbc_chars=8000,
+        )
     except Exception:
         pass
 
@@ -2255,7 +2317,8 @@ def plots_repair(payload: Dict[str, Any]):
         }
         plan = llm_route_read_plan(question=(prompt + "\n\n" + (combined_err or ""))[:6000], router_context=router_ctx)
         if plan and isinstance(plan, dict):
-            router_reads_ctx = execute_read_plan(ws_root=ws_root, scan=scan, plan=plan)
+            router_reads_ctx = execute_read_plan(ws_root=ws_root, scan=scan, plan=plan,
+                                                  adapter=_resolve_adapter(ws_root))
     except Exception:
         router_reads_ctx = None
 
@@ -2309,29 +2372,21 @@ def plots_repair(payload: Dict[str, Any]):
 
     compact_files = sorted(list(file_index.keys()))[:1200]
 
-    # Probe binary outputs for repair context
+    # Probe binary outputs for repair context (adapter-aware)
+    _adapter = _resolve_adapter(ws_root)
     output_probes = None
     try:
-        from gw.api.output_probes import probe_workspace_outputs
-        output_probes = probe_workspace_outputs(ws_root, file_index)
+        output_probes = _probe_workspace_outputs_via_adapter(_adapter, ws_root, file_index)
     except Exception:
         pass
 
     # Compact binary data summaries for repair context
     binary_data_summary: Dict[str, Any] = {}
     try:
-        from gw.api.output_probes import extract_hds_data, extract_cbc_data
-
-        for fpath in sorted(file_index.keys()):
-            ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
-            if ext == "hds" and "hds" not in binary_data_summary:
-                result = extract_hds_data(ws_root, fpath, max_times=2, max_chars=4000)
-                if result.get("ok"):
-                    binary_data_summary["hds"] = result["summary_text"]
-            elif ext == "cbc" and "cbc" not in binary_data_summary:
-                result = extract_cbc_data(ws_root, fpath, max_records=4, max_chars=4000)
-                if result.get("ok"):
-                    binary_data_summary["cbc"] = result["summary_text"]
+        binary_data_summary = _extract_binary_summaries(
+            _adapter, ws_root, file_index,
+            max_hds_times=2, max_hds_chars=4000, max_cbc_records=4, max_cbc_chars=4000,
+        )
     except Exception:
         pass
 

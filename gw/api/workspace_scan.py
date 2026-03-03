@@ -213,9 +213,18 @@ def ensure_workspace_scan(ws_root: Path, force: bool = False) -> Dict[str, Any]:
     snapshot = build_model_snapshot(ws_root)
     health = build_health_report(snapshot, file_index)
 
+    # Detect simulator type for this workspace
+    try:
+        from gw.api.simulator_config import get_adapter_for_workspace
+        adapter = get_adapter_for_workspace(ws_root)
+        simulator = adapter.info().name
+    except Exception:
+        simulator = "mf6"
+
     out = {
         "ok": True,
         "workspace_root": str(ws_root),
+        "simulator": simulator,
         "fingerprint": {"file_count": int(cur_count), "newest_mtime": float(cur_newest), "newest_mtime_iso": _utc_iso(cur_newest) if cur_newest else None},
         "file_index": file_index,
         "snapshot": snapshot,

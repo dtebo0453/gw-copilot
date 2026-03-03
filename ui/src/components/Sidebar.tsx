@@ -6,7 +6,6 @@ export function Sidebar({
   inputsDir,
   setInputsDir,
   onInspect,
-  recentArtifacts,
   scanStatus,
   workspace,
   onOpenSettings,
@@ -14,7 +13,6 @@ export function Sidebar({
   inputsDir: string;
   setInputsDir: (v: string) => void;
   onInspect: () => void;
-  recentArtifacts: string[];
   scanStatus?: string | null;
   workspace?: string | null;
   onOpenSettings?: () => void;
@@ -72,21 +70,6 @@ export function Sidebar({
 
       {/* Model Facts Panel */}
       <ModelFactsPanel inputsDir={inputsDir} workspace={workspace} />
-
-      <div className="sidebarSection" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        <div className="label">Recent artifacts</div>
-        <div className="list" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          {recentArtifacts.length === 0 ? (
-            <div className="muted">None yet</div>
-          ) : (
-            recentArtifacts.map((a) => (
-              <div key={a} className="listItem" title={a}>
-                {a}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
     </div>
   );
 }

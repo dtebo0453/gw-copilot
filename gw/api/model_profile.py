@@ -20,7 +20,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from gw.api.model_snapshot import build_model_snapshot, build_model_brief
-from gw.api.output_probes import probe_workspace_outputs
 from gw.api.workspace_files import resolve_workspace_root
 from gw.api.workspace_scan import (
     _compute_fingerprint,
@@ -188,7 +187,28 @@ def build_model_profile(ws_root: Path, *, force: bool = False) -> Dict[str, Any]
 
     output_probes: Dict[str, Any] = {}
     try:
-        output_probes = probe_workspace_outputs(ws_root, file_index)
+        # Use adapter when available, fall back to direct import
+        try:
+            from gw.api.simulator_config import get_adapter_for_workspace
+            _adapter = get_adapter_for_workspace(ws_root)
+        except Exception:
+            _adapter = None
+
+        if _adapter is not None:
+            for f in (file_index.get("files") or []):
+                if not isinstance(f, dict):
+                    continue
+                p = (f.get("path") or "").strip()
+                if not p:
+                    continue
+                ext = p.rsplit(".", 1)[-1].lower() if "." in p else ""
+                if ext == "hds" and "hds" not in output_probes:
+                    output_probes["hds"] = _adapter.probe_head_file(ws_root, p)
+                elif ext == "cbc" and "cbc" not in output_probes:
+                    output_probes["cbc"] = _adapter.probe_budget_file(ws_root, p)
+        else:
+            from gw.api.output_probes import probe_workspace_outputs
+            output_probes = probe_workspace_outputs(ws_root, file_index)
     except Exception:
         pass
 

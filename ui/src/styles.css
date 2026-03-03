@@ -36,7 +36,8 @@
   flex-direction: column;
   gap: 14px;
   height: 100vh;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
 
@@ -162,24 +163,29 @@
 }
 
 .splitter {
-  height: 8px;
+  height: 5px;
   cursor: row-resize;
-  background: #f4f4f4;
-  border-top: 1px solid #e6e6e6;
-  border-bottom: 1px solid #e6e6e6;
+  background: #bbb;
+  border: none;
   flex-shrink: 0;
   touch-action: none;
-  /* Larger invisible hit area via padding */
-  padding: 3px 0;
-  margin: -3px 0;
-  background-clip: content-box;
   transition: background 0.15s;
+  position: relative;
+}
+
+/* Invisible expanded hit area for easier grabbing */
+.splitter::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
 }
 
 .splitter:hover,
 .splitter:active {
-  background: #d0d0d0;
-  background-clip: content-box;
+  background: #90b4d8;
 }
 
 .tabs {
@@ -1131,8 +1137,8 @@
 }
 
 .facts-section {
-  margin-bottom: 10px;
-  padding-bottom: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
   border-bottom: 1px solid #f0f0f0;
 }
 
@@ -1145,18 +1151,28 @@
 .facts-row {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 6px;
+  align-items: center;
+  margin-bottom: 5px;
+  gap: 8px;
 }
 
 .facts-row:last-child {
   margin-bottom: 0;
 }
 
+.facts-row-sm {
+  font-size: 10px;
+}
+
 .facts-label {
   color: #666;
   font-size: 11px;
   flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.facts-row-sm .facts-label {
+  font-size: 10px;
 }
 
 .facts-value {
@@ -1166,22 +1182,29 @@
   font-size: 11px;
 }
 
-.facts-packages,
-.facts-outputs {
+.facts-row-sm .facts-value {
+  font-size: 10px;
+}
+
+/* Tag wrapping for packages, outputs, budget terms */
+.facts-tag-wrap {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
   justify-content: flex-end;
 }
 
 .facts-tag {
   display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
   background: #f0f0f0;
-  color: #444;
+  color: #555;
   border: 1px solid #e0e0e0;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .facts-tag.ok {
@@ -1194,6 +1217,44 @@
   background: #fce8e6;
   color: #c5221f;
   border-color: #f5c6cb;
+}
+
+/* Collapsible detail sections */
+.facts-detail-summary {
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+
+.facts-detail-summary:hover {
+  color: #333;
+}
+
+.facts-detail-body {
+  margin-top: 6px;
+  padding-left: 2px;
+}
+
+.facts-detail-note {
+  font-size: 9px;
+  color: #aaa;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* Stress package label — slightly bolder */
+.facts-pkg-label {
+  font-weight: 600;
+  color: #444;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* Separator dot in stress data */
+.facts-sep {
+  color: #888;
 }
 
 .facts-error {

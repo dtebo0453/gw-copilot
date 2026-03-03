@@ -67,14 +67,14 @@ export function WelcomeScreen({ onSelectFolder, onOpenSettings }: Props) {
           <div className="welcome-logo">🌊</div>
           <h1 className="welcome-title">GW Copilot</h1>
           <p className="welcome-subtitle">
-            AI-assisted groundwater modeling for MODFLOW 6
+            AI-assisted groundwater modeling for MODFLOW 6, MODFLOW-2005/NWT, MODFLOW-USG, SEAWAT, MT3DMS, and MODPATH
           </p>
         </div>
 
         <div className="welcome-section">
           <h2>Get Started</h2>
           <p className="muted">
-            Select a MODFLOW 6 model folder to begin exploring and improving your groundwater model.
+            Select a model folder to begin exploring and improving your groundwater model.
           </p>
 
           {/* Primary action: Browse for folder */}

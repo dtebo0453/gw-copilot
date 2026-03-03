@@ -69,39 +69,30 @@ def _run_dir(ws: Path, patch_id: str) -> Path:
     return p
 
 
-def _is_text_file_rel(path_rel: str) -> bool:
+# Generic text extensions recognised regardless of simulator
+_GENERIC_TEXT_EXTS = {
+    ".txt", ".csv", ".tsv", ".dat", ".md",
+    ".yml", ".yaml", ".json", ".lst", ".log",
+}
+
+
+def _is_text_file_rel(path_rel: str, *, adapter: "Any" = None) -> bool:
+    """Check whether *path_rel* is a patchable text file.
+
+    When an adapter is available its ``file_extensions()`` set is used for
+    simulator-specific extensions; otherwise a hardcoded MF6 fallback is
+    used for backward compatibility.
+    """
     ext = (Path(path_rel).suffix or "").lower()
+    if ext in _GENERIC_TEXT_EXTS:
+        return True
+    if adapter is not None:
+        return ext in adapter.file_extensions()
+    # Fallback: hardcoded MF6 extensions
     return ext in {
-        ".nam",
-        ".dis",
-        ".disu",
-        ".disv",
-        ".tdis",
-        ".ims",
-        ".npf",
-        ".sto",
-        ".ic",
-        ".oc",
-        ".wel",
-        ".chd",
-        ".ghb",
-        ".riv",
-        ".drn",
-        ".rch",
-        ".evt",
-        ".sfr",
-        ".uzf",
-        ".lak",
-        ".txt",
-        ".csv",
-        ".tsv",
-        ".dat",
-        ".md",
-        ".yml",
-        ".yaml",
-        ".json",
-        ".lst",
-        ".log",
+        ".nam", ".dis", ".disu", ".disv", ".tdis", ".ims",
+        ".npf", ".sto", ".ic", ".oc", ".wel", ".chd", ".ghb",
+        ".riv", ".drn", ".rch", ".evt", ".sfr", ".uzf", ".lak",
     }
 
 

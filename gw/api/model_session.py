@@ -19,6 +19,7 @@ class ModelSession:
     dis: Any  # DisInfo from viz.py (kept loose to avoid circular typing)
 
     grid_type: str = "dis"           # "dis", "disv", or "disu"
+    simulator_type: str = "mf6"      # simulator key (e.g. "mf6", "mf2005")
     flopy_sim: Any = None            # cached MFSimulation for DISV/DISU
     flopy_model_name: str = ""       # primary model name for FloPy
 

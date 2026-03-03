@@ -8,12 +8,14 @@ extraction, directory listing), trigger plot generation, and run QA/QC
 diagnostic checks.
 
 Supported tools:
-  - read_file          — Read any text file from the workspace
-  - read_binary_output — Extract numerical data from HDS/CBC via FloPy
-  - list_files         — List workspace files matching an optional glob pattern
-  - generate_plot      — Generate a plot in the sandbox (reuses plots.py infra)
-  - run_qa_check       — Run specialized QA/QC diagnostics (mass balance, dry cells, etc.)
-  - lookup_cell_info   — Get lat/lon, properties, and elevations of specific grid cells
+  - read_file                — Read any text file from the workspace
+  - read_binary_output       — Extract numerical data from HDS/CBC via FloPy
+  - read_concentration_output— Extract concentration data from UCN files (MT3DMS/SEAWAT)
+  - read_particle_output     — Extract particle data from MODPATH endpoint/pathline files
+  - list_files               — List workspace files matching an optional glob pattern
+  - generate_plot            — Generate a plot in the sandbox (reuses plots.py infra)
+  - run_qa_check             — Run specialized QA/QC diagnostics (mass balance, dry cells, etc.)
+  - lookup_cell_info         — Get lat/lon, properties, and elevations of specific grid cells
 
 Provider-specific implementations:
   - Anthropic: uses client.messages.create(tools=[...]) with tool_use / tool_result
@@ -30,7 +32,10 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from gw.simulators.base import SimulatorAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +79,15 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "Extract numerical data from a MODFLOW 6 binary output file (.hds or .cbc) "
             "via FloPy. Returns per-layer statistics (min, max, mean, median, std) for "
             "sampled timesteps, drawdown analysis (for HDS), or per-component budget "
-            "breakdowns (for CBC). Use this when the user asks about simulation results."
+            "breakdowns (for CBC). Use this when the user asks about simulation results.\n\n"
+            "OPTIONAL PARAMETERS for targeted extraction:\n"
+            "- cells: Extract head TIME-SERIES at specific cells (for .hds files). "
+            "Provide cell locations and get head values at every saved timestep, plus "
+            "per-cell statistics (min, max, trend, change). Use this when asked about "
+            "heads at specific wells or observation points.\n"
+            "- component: Extract PER-CELL FLOWS for a specific budget component (for .cbc files). "
+            "Returns the top cells by absolute flow magnitude. Use this when asked which "
+            "cells are the biggest sources/sinks, or for spatial flow analysis."
         ),
         "parameters": {
             "type": "object",
@@ -82,6 +95,32 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "path": {
                     "type": "string",
                     "description": "Relative path to the .hds or .cbc file within the workspace.",
+                },
+                "cells": {
+                    "type": "array",
+                    "description": (
+                        "Optional (HDS only): Extract head time-series at specific cells "
+                        "instead of layer-wide statistics. Each cell is an object with "
+                        "'layer', 'row', 'col' (all 1-based). Maximum 10 cells."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "layer": {"type": "integer", "description": "Layer number (1-based)"},
+                            "row": {"type": "integer", "description": "Row number (1-based)"},
+                            "col": {"type": "integer", "description": "Column number (1-based)"},
+                        },
+                        "required": ["layer", "row", "col"],
+                    },
+                    "maxItems": 10,
+                },
+                "component": {
+                    "type": "string",
+                    "description": (
+                        "Optional (CBC only): Extract per-cell flows for a specific budget "
+                        "component (e.g., 'WEL', 'CHD', 'RCH', 'STO-SS'). Returns the top "
+                        "cells by absolute flow magnitude with their cell locations."
+                    ),
                 },
             },
             "required": ["path"],
@@ -227,8 +266,113 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 
+# Additional tools — only exposed when the adapter supports them.
+_CONCENTRATION_TOOL: Dict[str, Any] = {
+    "name": "read_concentration_output",
+    "description": (
+        "Extract concentration data from a UCN binary file (MT3DMS, MT3D-USGS, "
+        "or SEAWAT). Returns per-layer statistics (min, max, mean, std) for "
+        "sampled timesteps, negative-concentration counts, and optional "
+        "time-series at specific cells.\n\n"
+        "Use this tool when the user asks about transport results, solute "
+        "concentrations, plume extent, or contaminant levels.\n\n"
+        "OPTIONAL PARAMETER:\n"
+        "- cells: Extract concentration TIME-SERIES at specific cells. "
+        "Provide cell locations (layer, row, col — 1-based) and get "
+        "concentration values at every saved timestep."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative path to the .UCN file (e.g., 'MT3D001.UCN'). "
+                    "For multi-species, each species has its own file."
+                ),
+            },
+            "cells": {
+                "type": "array",
+                "description": (
+                    "Optional: Extract concentration time-series at specific cells. "
+                    "Each cell: {'layer': int, 'row': int, 'col': int} (1-based). Max 10."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "layer": {"type": "integer"},
+                        "row": {"type": "integer"},
+                        "col": {"type": "integer"},
+                    },
+                    "required": ["layer", "row", "col"],
+                },
+                "maxItems": 10,
+            },
+        },
+        "required": ["path"],
+    },
+}
 
-def _tool_definitions_anthropic() -> List[Dict[str, Any]]:
+_PARTICLE_TOOL: Dict[str, Any] = {
+    "name": "read_particle_output",
+    "description": (
+        "Extract particle tracking data from MODPATH 7 output files (.mpend "
+        "for endpoints, .mppth for pathlines). Returns particle count, "
+        "termination status breakdown, travel time statistics, and capture "
+        "zone analysis.\n\n"
+        "Use this tool when the user asks about particle tracking results, "
+        "capture zones, travel times, or flow paths."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative path to the MODPATH output file "
+                    "(.mpend for endpoints, .mppth for pathlines)."
+                ),
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _apply_description_overrides(
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> List[Dict[str, Any]]:
+    """Return tool definitions with adapter-specific description overrides applied.
+
+    Also conditionally includes concentration and particle-tracking tools
+    when the adapter reports those capabilities.
+    """
+    base_tools = list(TOOL_DEFINITIONS)
+
+    # Conditionally add concentration / particle tools based on adapter
+    if adapter is not None:
+        caps = adapter.output_capabilities()
+        if caps.concentration:
+            base_tools.append(_CONCENTRATION_TOOL)
+        if caps.pathlines or caps.endpoints:
+            base_tools.append(_PARTICLE_TOOL)
+
+    if adapter is None:
+        return base_tools
+    overrides = adapter.tool_descriptions()
+    if not overrides:
+        return base_tools
+    result = []
+    for t in base_tools:
+        if t["name"] in overrides:
+            t = {**t, "description": overrides[t["name"]]}
+        result.append(t)
+    return result
+
+
+def _tool_definitions_anthropic(
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> List[Dict[str, Any]]:
     """Convert tool definitions to Anthropic format."""
     return [
         {
@@ -236,11 +380,13 @@ def _tool_definitions_anthropic() -> List[Dict[str, Any]]:
             "description": t["description"],
             "input_schema": t["parameters"],
         }
-        for t in TOOL_DEFINITIONS
+        for t in _apply_description_overrides(adapter)
     ]
 
 
-def _tool_definitions_openai() -> List[Dict[str, Any]]:
+def _tool_definitions_openai(
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> List[Dict[str, Any]]:
     """Convert tool definitions to OpenAI responses API function tool format."""
     return [
         {
@@ -249,7 +395,7 @@ def _tool_definitions_openai() -> List[Dict[str, Any]]:
             "description": t["description"],
             "parameters": t["parameters"],
         }
-        for t in TOOL_DEFINITIONS
+        for t in _apply_description_overrides(adapter)
     ]
 
 
@@ -264,6 +410,7 @@ def _execute_tool(
     ws_root: Path,
     inputs_dir: str,
     workspace: Optional[str] = None,
+    adapter: Optional["SimulatorAdapter"] = None,
 ) -> Dict[str, Any]:
     """Dispatch a tool call and return its result.
 
@@ -274,7 +421,7 @@ def _execute_tool(
         if name == "read_file":
             return _tool_read_file(args, ws_root=ws_root)
         elif name == "read_binary_output":
-            return _tool_read_binary(args, ws_root=ws_root)
+            return _tool_read_binary(args, ws_root=ws_root, adapter=adapter)
         elif name == "list_files":
             return _tool_list_files(args, ws_root=ws_root)
         elif name == "generate_plot":
@@ -282,9 +429,13 @@ def _execute_tool(
                 args, ws_root=ws_root, inputs_dir=inputs_dir, workspace=workspace,
             )
         elif name == "run_qa_check":
-            return _tool_run_qa_check(args, ws_root=ws_root)
+            return _tool_run_qa_check(args, ws_root=ws_root, adapter=adapter)
         elif name == "lookup_cell_info":
             return _tool_lookup_cell_info(args, ws_root=ws_root, inputs_dir=inputs_dir)
+        elif name == "read_concentration_output":
+            return _tool_read_concentration(args, ws_root=ws_root, adapter=adapter)
+        elif name == "read_particle_output":
+            return _tool_read_particle(args, ws_root=ws_root, adapter=adapter)
         else:
             return {"ok": False, "error": f"Unknown tool: {name}"}
     except Exception as e:
@@ -342,11 +493,25 @@ def _tool_read_file(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
     }
 
 
-def _tool_read_binary(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
-    """Extract data from an HDS or CBC binary file."""
-    from gw.api.output_probes import extract_hds_data, extract_cbc_data
+def _tool_read_binary(
+    args: Dict[str, Any],
+    *,
+    ws_root: Path,
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> Dict[str, Any]:
+    """Extract data from an HDS or CBC binary file.
 
+    Delegates to the simulator adapter when available; falls back to
+    direct ``output_probes`` imports for backward compatibility.
+
+    Optional parameters:
+      - cells: for HDS files, extract per-cell time-series instead of layer stats
+      - component: for CBC files, extract per-cell flows for a specific budget term
+    """
     rel = args.get("path", "")
+    cells = args.get("cells")
+    component = args.get("component")
+
     p = _safe_resolve(ws_root, rel)
     if p is None:
         return {"ok": False, "error": f"Invalid or unsafe path: {rel}"}
@@ -355,7 +520,20 @@ def _tool_read_binary(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
 
     ext = p.suffix.lower()
     if ext == ".hds":
-        result = extract_hds_data(ws_root, rel, max_chars=50_000)
+        if cells and isinstance(cells, list):
+            # Per-cell time-series extraction
+            if adapter is not None:
+                result = adapter.extract_head_timeseries(ws_root, rel, cells=cells, max_chars=50_000)
+            else:
+                from gw.api.output_probes import extract_hds_timeseries
+                result = extract_hds_timeseries(ws_root, rel, cells=cells, max_chars=50_000)
+        else:
+            # Layer-wide statistics (existing behavior)
+            if adapter is not None:
+                result = adapter.extract_head_data(ws_root, rel, max_chars=50_000)
+            else:
+                from gw.api.output_probes import extract_hds_data
+                result = extract_hds_data(ws_root, rel, max_chars=50_000)
         if result.get("ok") and result.get("summary_text"):
             return {
                 "ok": True,
@@ -367,7 +545,24 @@ def _tool_read_binary(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
         return {"ok": False, "error": result.get("error", "Failed to extract HDS data")}
 
     elif ext == ".cbc":
-        result = extract_cbc_data(ws_root, rel, max_chars=40_000)
+        if component and isinstance(component, str) and component.strip():
+            # Per-cell budget flows for a specific component
+            if adapter is not None:
+                result = adapter.extract_budget_cells(
+                    ws_root, rel, component=component.strip(), max_chars=40_000,
+                )
+            else:
+                from gw.api.output_probes import extract_cbc_cell_flows
+                result = extract_cbc_cell_flows(
+                    ws_root, rel, component=component.strip(), max_chars=40_000,
+                )
+        else:
+            # Component-level totals (existing behavior)
+            if adapter is not None:
+                result = adapter.extract_budget_data(ws_root, rel, max_chars=40_000)
+            else:
+                from gw.api.output_probes import extract_cbc_data
+                result = extract_cbc_data(ws_root, rel, max_chars=40_000)
         if result.get("ok") and result.get("summary_text"):
             return {
                 "ok": True,
@@ -380,6 +575,92 @@ def _tool_read_binary(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
 
     else:
         return {"ok": False, "error": f"Unsupported binary format: {ext}. Only .hds and .cbc are supported."}
+
+
+def _tool_read_concentration(
+    args: Dict[str, Any],
+    *,
+    ws_root: Path,
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> Dict[str, Any]:
+    """Extract data from a UCN (concentration) binary file."""
+    rel = args.get("path", "")
+    cells = args.get("cells")
+
+    p = _safe_resolve(ws_root, rel)
+    if p is None:
+        return {"ok": False, "error": f"Invalid or unsafe path: {rel}"}
+    if not p.exists() or not p.is_file():
+        return {"ok": False, "error": f"File not found: {rel}"}
+
+    if cells and isinstance(cells, list):
+        # Per-cell concentration time-series
+        if adapter is not None:
+            result = adapter.extract_concentration_timeseries(
+                ws_root, rel, cells=cells, max_chars=50_000
+            )
+        else:
+            from gw.api.output_probes import extract_ucn_timeseries
+            result = extract_ucn_timeseries(ws_root, rel, cells=cells, max_chars=50_000)
+    else:
+        # Layer-wide statistics
+        if adapter is not None:
+            result = adapter.extract_concentration_data(
+                ws_root, rel, max_chars=50_000
+            )
+        else:
+            from gw.api.output_probes import extract_ucn_data
+            result = extract_ucn_data(ws_root, rel, max_chars=50_000)
+
+    if result.get("ok") and result.get("summary_text"):
+        return {
+            "ok": True,
+            "path": rel,
+            "type": "ucn",
+            "data": result["summary_text"],
+            "metadata": result.get("metadata", {}),
+        }
+    return {"ok": False, "error": result.get("error", "Failed to extract concentration data")}
+
+
+def _tool_read_particle(
+    args: Dict[str, Any],
+    *,
+    ws_root: Path,
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> Dict[str, Any]:
+    """Extract data from a MODPATH output file (endpoints or pathlines)."""
+    rel = args.get("path", "")
+
+    p = _safe_resolve(ws_root, rel)
+    if p is None:
+        return {"ok": False, "error": f"Invalid or unsafe path: {rel}"}
+    if not p.exists() or not p.is_file():
+        return {"ok": False, "error": f"File not found: {rel}"}
+
+    ext = p.suffix.lower()
+    if ext == ".mpend":
+        if adapter is not None:
+            result = adapter.extract_endpoint_data(ws_root, rel, max_chars=40_000)
+        else:
+            return {"ok": False, "error": "Endpoint extraction requires a MODPATH adapter"}
+    elif ext == ".mppth":
+        if adapter is not None:
+            result = adapter.extract_pathline_data(ws_root, rel, max_chars=50_000)
+        else:
+            return {"ok": False, "error": "Pathline extraction requires a MODPATH adapter"}
+    else:
+        return {"ok": False, "error": f"Unsupported MODPATH format: {ext}. Use .mpend or .mppth."}
+
+    if result.get("ok") and result.get("summary_text"):
+        return {
+            "ok": True,
+            "path": rel,
+            "type": "modpath",
+            "data": result["summary_text"],
+            "metadata": result.get("metadata", {}),
+        }
+    return {"ok": False, "error": result.get("error", "Failed to extract particle data")}
 
 
 def _tool_list_files(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
@@ -404,16 +685,27 @@ def _tool_list_files(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
     }
 
 
-def _tool_run_qa_check(args: Dict[str, Any], *, ws_root: Path) -> Dict[str, Any]:
-    """Run a QA/QC diagnostic check on the model."""
-    from gw.api.qa_diagnostics import run_qa_check
+def _tool_run_qa_check(
+    args: Dict[str, Any],
+    *,
+    ws_root: Path,
+    adapter: Optional["SimulatorAdapter"] = None,
+) -> Dict[str, Any]:
+    """Run a QA/QC diagnostic check on the model.
 
+    Delegates to the simulator adapter when available; falls back to
+    direct ``qa_diagnostics`` import for backward compatibility.
+    """
     check_name = str(args.get("check_name", "")).strip()
     if not check_name:
         return {"ok": False, "error": "check_name is required"}
 
     try:
-        report = run_qa_check(str(ws_root), check_name)
+        if adapter is not None:
+            report = adapter.run_qa_check(ws_root, check_name)
+        else:
+            from gw.api.qa_diagnostics import run_qa_check
+            report = run_qa_check(str(ws_root), check_name)
         return {
             "ok": True,
             "check": check_name,
@@ -599,12 +891,13 @@ def _anthropic_tool_loop(
     inputs_dir: str,
     workspace: Optional[str] = None,
     max_iterations: int = 15,
+    adapter: Optional["SimulatorAdapter"] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Run the tool-use loop using the Anthropic messages API.
 
     Returns: (final_text, audit_log)
     """
-    tools = _tool_definitions_anthropic()
+    tools = _tool_definitions_anthropic(adapter)
     audit: List[Dict[str, Any]] = []
     accumulated_text = ""
 
@@ -677,6 +970,7 @@ def _anthropic_tool_loop(
             result = _execute_tool(
                 tc["name"], tc["input"],
                 ws_root=ws_root, inputs_dir=inputs_dir, workspace=workspace,
+                adapter=adapter,
             )
             tc_dt = time.time() - tc_t0
 
@@ -728,12 +1022,13 @@ def _openai_tool_loop(
     inputs_dir: str,
     workspace: Optional[str] = None,
     max_iterations: int = 15,
+    adapter: Optional["SimulatorAdapter"] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Run the tool-use loop using the OpenAI responses API.
 
     Returns: (final_text, audit_log)
     """
-    tools = _tool_definitions_openai()
+    tools = _tool_definitions_openai(adapter)
     audit: List[Dict[str, Any]] = []
     accumulated_text = ""
 
@@ -814,6 +1109,7 @@ def _openai_tool_loop(
             result = _execute_tool(
                 fc["name"], parsed_args,
                 ws_root=ws_root, inputs_dir=inputs_dir, workspace=workspace,
+                adapter=adapter,
             )
             tc_dt = time.time() - tc_t0
 
@@ -867,6 +1163,7 @@ def tool_loop(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     max_iterations: int = 15,
+    adapter: Optional["SimulatorAdapter"] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Run the agentic tool-use loop with the configured LLM provider.
 
@@ -880,6 +1177,7 @@ def tool_loop(
     provider : 'anthropic' or 'openai' (auto-detected if None)
     model : model name override
     max_iterations : max tool-calling rounds (default 15)
+    adapter : simulator adapter for delegated tool execution
 
     Returns
     -------
@@ -910,6 +1208,7 @@ def tool_loop(
             inputs_dir=inputs_dir,
             workspace=workspace,
             max_iterations=max_iterations,
+            adapter=adapter,
         )
 
     else:
@@ -931,4 +1230,5 @@ def tool_loop(
             inputs_dir=inputs_dir,
             workspace=workspace,
             max_iterations=max_iterations,
+            adapter=adapter,
         )

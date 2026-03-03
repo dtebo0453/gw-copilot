@@ -215,7 +215,6 @@ export function App() {
             inputsDir={inputsDir}
             setInputsDir={setInputsDir}
             onInspect={doInspect}
-            recentArtifacts={recentArtifacts}
             scanStatus={scanStatus}
             workspace={workspace}
             onOpenSettings={() => setShowLLMSettings(true)}
@@ -240,13 +239,13 @@ export function App() {
                   <div className="modalBody">
                     {importPlan._setup_mode ? (
                       <div className="muted" style={{ marginBottom: 8 }}>
-                        A MODFLOW 6 workspace was detected. A <code>GW_Copilot/</code> folder
+                        A MODFLOW workspace was detected. A <code>GW_Copilot/</code> folder
                         will be created inside this directory to store validation reports, plots,
                         and other tool outputs. <strong>Your original model files will not be modified.</strong>
                       </div>
                     ) : (
                       <div className="muted" style={{ marginBottom: 8 }}>
-                        No Copilot project was found in the selected folder. I detected a MODFLOW 6 workspace and can create a
+                        No Copilot project was found in the selected folder. I detected a MODFLOW workspace and can create a
                         wrapper project under <code>runs/imported/</code>.
                       </div>
                     )}

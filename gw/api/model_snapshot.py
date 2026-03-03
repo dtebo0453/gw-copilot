@@ -1332,9 +1332,63 @@ def workspace_facts(inputs_dir: str, workspace: Optional[str] = None) -> Dict[st
     
     snapshot = build_model_snapshot(ws_root)
     
+    # Detect simulator type
+    simulator_name = None
+    try:
+        from gw.api.simulator_config import get_adapter_for_workspace
+        adapter = get_adapter_for_workspace(ws_root)
+        simulator_name = adapter.info().display_name
+    except Exception:
+        pass
+
+    # Compact stress package summaries for the sidebar
+    stress_sums = snapshot.get("stress_summaries", {})
+    sidebar_stress: Dict[str, Any] = {}
+    for pkg, info in sorted(stress_sums.items()):
+        s: Dict[str, Any] = {}
+        if info.get("total_records") is not None:
+            s["records"] = info["total_records"]
+        if info.get("periods_with_data") is not None:
+            s["periods"] = info["periods_with_data"]
+        if info.get("value_range"):
+            vr = info["value_range"]
+            s["range"] = [round(vr[0], 4), round(vr[1], 4)]
+        if s:
+            sidebar_stress[pkg] = s
+
+    # Compact output metadata for the sidebar
+    out_meta = snapshot.get("output_metadata", {})
+    sidebar_outputs: Dict[str, Any] = {}
+    hds_info = out_meta.get("hds", {})
+    if hds_info.get("ok"):
+        hds_summary: Dict[str, Any] = {}
+        if hds_info.get("ntimes"):
+            hds_summary["times"] = hds_info["ntimes"]
+        if hds_info.get("shape"):
+            hds_summary["shape"] = hds_info["shape"]
+        if hds_info.get("value_range"):
+            vr = hds_info["value_range"]
+            # Filter out HDRY/HNOFLO sentinel values (1e20+, -1e20-, -999.99, etc.)
+            vr_lo = vr[0] if abs(vr[0]) < 1e15 else None
+            vr_hi = vr[1] if abs(vr[1]) < 1e15 else None
+            if vr_lo is not None and vr_hi is not None:
+                hds_summary["head_range"] = [round(vr_lo, 2), round(vr_hi, 2)]
+        sidebar_outputs["hds"] = hds_summary
+    cbc_info = out_meta.get("cbc", {})
+    if cbc_info.get("ok"):
+        cbc_summary: Dict[str, Any] = {}
+        if cbc_info.get("ntimes"):
+            cbc_summary["times"] = cbc_info["ntimes"]
+        if cbc_info.get("record_names"):
+            cbc_summary["components"] = cbc_info["record_names"]
+        if cbc_info.get("precision"):
+            cbc_summary["precision"] = cbc_info["precision"]
+        sidebar_outputs["cbc"] = cbc_summary
+
     return {
         "ok": snapshot.get("ok", False),
         "workspace_root": str(ws_root),
+        "simulator": simulator_name,
         "grid": snapshot.get("grid"),
         "tdis": {
             "nper": snapshot.get("tdis", {}).get("nper"),
@@ -1346,4 +1400,7 @@ def workspace_facts(inputs_dir: str, workspace: Optional[str] = None) -> Dict[st
         "facts": snapshot.get("facts", []),
         "extraction_method": snapshot.get("extraction_method"),
         "layers": snapshot.get("layers", []),
+        "stress_summaries": sidebar_stress,
+        "output_metadata": sidebar_outputs,
+        "solver": snapshot.get("ims"),
     }

@@ -8,8 +8,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from gw.api.workspace_files import read_file_text
-from gw.api.output_probes import probe_hds, probe_cbc, extract_hds_data, extract_cbc_data
-from gw.llm.mf6_filetype_knowledge import package_property_summary
+from typing import TYPE_CHECKING as _TC
+if _TC:
+    from gw.simulators.base import SimulatorAdapter
+
+
+# Lazy fallbacks for binary output probing (when no adapter is available)
+def _probe_hds_fallback(ws_root, rel):
+    from gw.api.output_probes import probe_hds
+    return probe_hds(ws_root, rel)
+
+def _probe_cbc_fallback(ws_root, rel):
+    from gw.api.output_probes import probe_cbc
+    return probe_cbc(ws_root, rel)
+
+def _extract_hds_fallback(ws_root, rel, **kw):
+    from gw.api.output_probes import extract_hds_data
+    return extract_hds_data(ws_root, rel, **kw)
+
+def _extract_cbc_fallback(ws_root, rel, **kw):
+    from gw.api.output_probes import extract_cbc_data
+    return extract_cbc_data(ws_root, rel, **kw)
+
+
+def _get_package_property_summary() -> str:
+    """Get package property summary, preferring adapter when available."""
+    try:
+        from gw.llm.mf6_filetype_knowledge import package_property_summary
+        return package_property_summary()
+    except Exception:
+        return ""
 
 
 """LLM router + deterministic read-plan executor.
@@ -134,7 +162,7 @@ def _anthropic_client():
 
 
 def _build_router_system_prompt(router_context: Dict[str, Any]) -> str:
-    pkg_knowledge = package_property_summary()
+    pkg_knowledge = _get_package_property_summary()
     return (
         "You are a router for a groundwater modeling copilot. "
         "Given the user request and a workspace index + snapshot facts, "
@@ -321,6 +349,7 @@ def execute_read_plan(
     scan: Optional[Dict[str, Any]],
     plan: Dict[str, Any],
     max_total_chars: int = 140_000,
+    adapter: "Optional[SimulatorAdapter]" = None,
 ) -> Dict[str, Any]:
     """Execute a validated read plan inside the workspace.
 
@@ -444,7 +473,10 @@ def execute_read_plan(
             try:
                 if ext == '.hds':
                     # Full data extraction: per-layer stats + drawdown analysis
-                    extraction = extract_hds_data(ws_root, rel, max_chars=remaining_chars)
+                    if adapter is not None:
+                        extraction = adapter.extract_head_data(ws_root, rel, max_chars=remaining_chars)
+                    else:
+                        extraction = _extract_hds_fallback(ws_root, rel, max_chars=remaining_chars)
                     if extraction.get('ok') and extraction.get('summary_text'):
                         content = extraction['summary_text']
                         total += len(content)
@@ -454,13 +486,16 @@ def execute_read_plan(
                         })
                     else:
                         # Fallback to metadata-only probe
-                        probe = probe_hds(ws_root, rel)
+                        probe = adapter.probe_head_file(ws_root, rel) if adapter else _probe_hds_fallback(ws_root, rel)
                         content = json.dumps(probe, default=str)
                         total += len(content)
                         results.append({'kind': 'binary_probe', 'path': rel, 'file_type': 'hds', 'content': content, 'probe': probe})
                 elif ext == '.cbc':
                     # Full data extraction: per-component budget stats
-                    extraction = extract_cbc_data(ws_root, rel, max_chars=remaining_chars)
+                    if adapter is not None:
+                        extraction = adapter.extract_budget_data(ws_root, rel, max_chars=remaining_chars)
+                    else:
+                        extraction = _extract_cbc_fallback(ws_root, rel, max_chars=remaining_chars)
                     if extraction.get('ok') and extraction.get('summary_text'):
                         content = extraction['summary_text']
                         total += len(content)
@@ -470,7 +505,7 @@ def execute_read_plan(
                         })
                     else:
                         # Fallback to metadata-only probe
-                        probe = probe_cbc(ws_root, rel)
+                        probe = adapter.probe_budget_file(ws_root, rel) if adapter else _probe_cbc_fallback(ws_root, rel)
                         content = json.dumps(probe, default=str)
                         total += len(content)
                         results.append({'kind': 'binary_probe', 'path': rel, 'file_type': 'cbc', 'content': content, 'probe': probe})

@@ -7,7 +7,10 @@ import re
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from gw.simulators.base import SimulatorAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,23 @@ from gw.llm.mf6_filetype_knowledge import (
     property_to_package,
     package_property_summary,
 )
-from gw.api.output_probes import probe_hds, probe_cbc, extract_hds_data, extract_cbc_data
+# Lazy imports for output_probes — prefer adapter delegation when available.
+# Direct imports kept as fallback when no adapter is resolved.
+def _probe_hds_fallback(ws_root, rel):
+    from gw.api.output_probes import probe_hds
+    return probe_hds(ws_root, rel)
+
+def _probe_cbc_fallback(ws_root, rel):
+    from gw.api.output_probes import probe_cbc
+    return probe_cbc(ws_root, rel)
+
+def _extract_hds_fallback(ws_root, rel, **kw):
+    from gw.api.output_probes import extract_hds_data
+    return extract_hds_data(ws_root, rel, **kw)
+
+def _extract_cbc_fallback(ws_root, rel, **kw):
+    from gw.api.output_probes import extract_cbc_data
+    return extract_cbc_data(ws_root, rel, **kw)
 
 """GW Copilot chat agent — unified LLM-first architecture.
 
@@ -44,18 +63,46 @@ If no LLM is configured the agent falls back to helpful deterministic guidance.
 # Lightweight workspace file grounding
 # -----------------------------
 
-_FILE_MENTION_RE = re.compile(
-    r"(?:(?:\./|/)?[\w\-./\\]+\.(?:"
-    r"dis|disv|disu|nam|nams|tdis|ims|npf|sto|oc|ic|chd|wel|riv|drn|evt|rch|ghb|lak|sfr|uzf|maw|csub|gwt|grb|"
-    r"hds|cbc|lst|"
-    r"csv|json|txt|py|ts|tsx|md|yaml|yml"
-    r"))", re.IGNORECASE
-)
+def _build_file_mention_re(simulator_pattern: str = "") -> re.Pattern:
+    """Build a file-mention regex, optionally using simulator-specific extensions."""
+    if not simulator_pattern:
+        # Default: MF6 extensions (backward compat when no adapter is available)
+        simulator_pattern = (
+            "dis|disv|disu|nam|nams|tdis|ims|npf|sto|oc|ic|"
+            "chd|wel|riv|drn|evt|rch|ghb|lak|sfr|uzf|maw|csub|gwt|grb|"
+            "hds|cbc|lst"
+        )
+    generic = "csv|json|txt|py|ts|tsx|md|yaml|yml"
+    return re.compile(
+        r"(?:(?:\./|/)?[\w\-./\\]+\.(?:"
+        + simulator_pattern + r"|" + generic
+        + r"))", re.IGNORECASE
+    )
 
-def _extract_file_mentions(message: str) -> List[str]:
+# Module-level default for backward compatibility
+_FILE_MENTION_RE = _build_file_mention_re()
+
+# Cache for adapter-specific compiled regexes
+_ADAPTER_RE_CACHE: Dict[str, re.Pattern] = {}
+
+def _get_file_mention_re(adapter: "Optional[SimulatorAdapter]" = None) -> re.Pattern:
+    """Get file-mention regex, using adapter's pattern when available."""
+    if adapter is None:
+        return _FILE_MENTION_RE
+    name = adapter.info().name
+    if name not in _ADAPTER_RE_CACHE:
+        try:
+            pattern = adapter.file_mention_pattern()
+        except Exception:
+            pattern = ""
+        _ADAPTER_RE_CACHE[name] = _build_file_mention_re(pattern) if pattern else _FILE_MENTION_RE
+    return _ADAPTER_RE_CACHE[name]
+
+def _extract_file_mentions(message: str, adapter: "Optional[SimulatorAdapter]" = None) -> List[str]:
     """Extract probable file paths mentioned in a user message."""
+    regex = _get_file_mention_re(adapter)
     hits = []
-    for m in _FILE_MENTION_RE.finditer(message or ""):
+    for m in regex.finditer(message or ""):
         p = m.group(0).strip().strip('"').strip("'")
         # normalize slashes
         p = p.replace("\\", "/")
@@ -303,7 +350,10 @@ def _deterministic_property_answer(text: str, ws_root: Optional[Path], scan: Opt
     return "\n".join(lines)
 
 
-def _maybe_attach_workspace_files(ctx: Dict[str, Any], *, inputs_dir: str, workspace: str | None, message: str) -> None:
+def _maybe_attach_workspace_files(
+    ctx: Dict[str, Any], *, inputs_dir: str, workspace: str | None, message: str,
+    adapter: "Optional[SimulatorAdapter]" = None,
+) -> None:
     """Attach relevant file snippets when user explicitly references files.
 
     For text files: reads content directly (with MF6 block extraction for large files).
@@ -317,7 +367,7 @@ def _maybe_attach_workspace_files(ctx: Dict[str, Any], *, inputs_dir: str, works
     if not ws_root.exists():
         return
 
-    mentions = _extract_file_mentions(message)
+    mentions = _extract_file_mentions(message, adapter=adapter)
     if not mentions:
         return
 
@@ -334,20 +384,28 @@ def _maybe_attach_workspace_files(ctx: Dict[str, Any], *, inputs_dir: str, works
 
         ext = p.suffix.lower()
 
-        # Binary output files: extract actual data via FloPy
+        # Binary output files: extract actual data via adapter (or fallback)
         if ext == ".hds":
-            result = extract_hds_data(ws_root, rel, max_chars=40_000)
+            if adapter is not None:
+                result = adapter.extract_head_data(ws_root, rel, max_chars=40_000)
+            else:
+                result = _extract_hds_fallback(ws_root, rel, max_chars=40_000)
             if result.get("ok") and result.get("summary_text"):
                 attached.append({"path": rel, "kind": "binary_hds_extracted", "content": result["summary_text"], "metadata": result.get("metadata", {})})
             else:
-                attached.append({"path": rel, "kind": "binary_hds", "probe": probe_hds(ws_root, rel)})
+                probe = adapter.probe_head_file(ws_root, rel) if adapter else _probe_hds_fallback(ws_root, rel)
+                attached.append({"path": rel, "kind": "binary_hds", "probe": probe})
             continue
         if ext == ".cbc":
-            result = extract_cbc_data(ws_root, rel, max_chars=30_000)
+            if adapter is not None:
+                result = adapter.extract_budget_data(ws_root, rel, max_chars=30_000)
+            else:
+                result = _extract_cbc_fallback(ws_root, rel, max_chars=30_000)
             if result.get("ok") and result.get("summary_text"):
                 attached.append({"path": rel, "kind": "binary_cbc_extracted", "content": result["summary_text"], "metadata": result.get("metadata", {})})
             else:
-                attached.append({"path": rel, "kind": "binary_cbc", "probe": probe_cbc(ws_root, rel)})
+                probe = adapter.probe_budget_file(ws_root, rel) if adapter else _probe_cbc_fallback(ws_root, rel)
+                attached.append({"path": rel, "kind": "binary_cbc", "probe": probe})
             continue
 
         try:
@@ -792,9 +850,11 @@ def _llm_reply(
     if enable_tools and ws_root is not None and inputs_dir:
         try:
             from gw.llm.tool_loop import tool_loop
+            from gw.api.simulator_config import get_adapter_for_workspace
+            adapter = get_adapter_for_workspace(ws_root)
 
-            ctx, model_facts_text = _build_context(inputs_dir, workspace, message, extra_ctx)
-            system = _build_system_prompt(ctx, model_facts_text)
+            ctx, model_facts_text = _build_context(inputs_dir, workspace, message, extra_ctx, adapter=adapter)
+            system = _build_system_prompt(ctx, model_facts_text, adapter=adapter)
 
             text, audit = tool_loop(
                 messages=messages,
@@ -804,6 +864,7 @@ def _llm_reply(
                 workspace=workspace,
                 provider=provider,
                 model=model,
+                adapter=adapter,
             )
             return text, audit
         except Exception as tool_err:
@@ -1090,6 +1151,7 @@ def _build_context(
     workspace: Optional[str],
     message: str,
     extra_ctx: Optional[Dict[str, Any]],
+    adapter: "Optional[SimulatorAdapter]" = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Build context and model facts for LLM calls."""
     ctx = _read_project_context(inputs_dir)
@@ -1303,7 +1365,10 @@ def _build_context(
                     ext = bf.rsplit(".", 1)[-1].lower() if "." in bf else ""
                     try:
                         if ext == "hds":
-                            result = extract_hds_data(ws_root, bf, max_chars=40_000)
+                            if adapter is not None:
+                                result = adapter.extract_head_data(ws_root, bf, max_chars=40_000)
+                            else:
+                                result = _extract_hds_fallback(ws_root, bf, max_chars=40_000)
                             if result.get("ok") and result.get("summary_text"):
                                 binary_extractions[bf] = {
                                     "type": "hds",
@@ -1311,10 +1376,13 @@ def _build_context(
                                     "metadata": result.get("metadata", {}),
                                 }
                             else:
-                                # Fallback to metadata probe
-                                binary_extractions[bf] = {"type": "hds", "probe": probe_hds(ws_root, bf)}
+                                probe = adapter.probe_head_file(ws_root, bf) if adapter else _probe_hds_fallback(ws_root, bf)
+                                binary_extractions[bf] = {"type": "hds", "probe": probe}
                         elif ext == "cbc":
-                            result = extract_cbc_data(ws_root, bf, max_chars=30_000)
+                            if adapter is not None:
+                                result = adapter.extract_budget_data(ws_root, bf, max_chars=30_000)
+                            else:
+                                result = _extract_cbc_fallback(ws_root, bf, max_chars=30_000)
                             if result.get("ok") and result.get("summary_text"):
                                 binary_extractions[bf] = {
                                     "type": "cbc",
@@ -1322,7 +1390,8 @@ def _build_context(
                                     "metadata": result.get("metadata", {}),
                                 }
                             else:
-                                binary_extractions[bf] = {"type": "cbc", "probe": probe_cbc(ws_root, bf)}
+                                probe = adapter.probe_budget_file(ws_root, bf) if adapter else _probe_cbc_fallback(ws_root, bf)
+                                binary_extractions[bf] = {"type": "cbc", "probe": probe}
                     except Exception:
                         pass
                 if binary_extractions:
@@ -1334,14 +1403,32 @@ def _build_context(
         pass
     
     # Attach referenced workspace files and docs
-    _maybe_attach_workspace_files(ctx, inputs_dir=inputs_dir or "", workspace=workspace, message=message)
+    _maybe_attach_workspace_files(ctx, inputs_dir=inputs_dir or "", workspace=workspace, message=message, adapter=adapter)
     _maybe_attach_docs(ctx, inputs_dir=inputs_dir or "", workspace=workspace, message=message)
     
     return ctx, model_facts_text
 
 
-def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
-    """Build system prompt with facts and context."""
+def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str,
+                         adapter: "Optional[SimulatorAdapter]" = None) -> str:
+    """Build system prompt with facts, context, and simulator knowledge.
+
+    When *adapter* is provided, simulator-specific knowledge fragments
+    (file formats, QA check descriptions, domain thresholds) come from the
+    adapter rather than being hardcoded.  This lets the same prompt
+    structure work for any supported simulator.
+    """
+    # Resolve adapter (lazy import to avoid circular deps)
+    if adapter is None:
+        try:
+            from gw.simulators.mf6.adapter import MF6Adapter
+            adapter = MF6Adapter()
+        except Exception:
+            adapter = None
+
+    sim_name = adapter.info().display_name if adapter else "MODFLOW 6"
+    sim_knowledge = adapter.system_prompt_fragment() if adapter else ""
+
     facts_section = f"\n\n{model_facts_text}\n" if model_facts_text else ""
 
     # Compact model brief for LLM grounding
@@ -1349,21 +1436,35 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
     snapshot = ctx.get("model_snapshot", {}) if isinstance(ctx, dict) else {}
     if isinstance(snapshot, dict) and snapshot:
         try:
-            from gw.api.model_snapshot import build_model_brief
-            brief = build_model_brief(snapshot)
+            if adapter:
+                brief = adapter.build_model_brief(snapshot)
+            else:
+                from gw.api.model_snapshot import build_model_brief
+                brief = build_model_brief(snapshot)
             if brief:
                 model_brief_section = f"\n\nMODEL BRIEF:\n{brief}\n"
         except Exception:
             pass
 
-    # Always include the static knowledge base so the LLM knows which files to check
-    pkg_summary = package_property_summary()
+    # Package property summary from adapter or fallback
     pkg_section = ""
-    if pkg_summary:
-        pkg_section = f"\n\nPACKAGE FILES AND THEIR CONTENTS:\n{pkg_summary}\n"
+    try:
+        if adapter:
+            props = adapter.package_properties()
+            lines = []
+            for pkg_type, pkg_info in props.items():
+                arr_labels = [f"{name} ({arr.label})" for name, arr in pkg_info.arrays.items()]
+                lines.append(f"- {pkg_type} ({pkg_info.file_ext}): {', '.join(arr_labels)}")
+            pkg_summary = "\n".join(lines)
+        else:
+            pkg_summary = package_property_summary()
+        if pkg_summary:
+            pkg_section = f"\n\nPACKAGE FILES AND THEIR CONTENTS:\n{pkg_summary}\n"
+    except Exception:
+        pass
 
     return (
-        "You are a senior groundwater-modeling copilot for a MODFLOW 6 project.\n\n"
+        f"You are a senior groundwater-modeling copilot for a {sim_name} project.\n\n"
 
         "YOUR CAPABILITIES:\n"
         "- You have FULL READ ACCESS to every file in the workspace (text and binary).\n"
@@ -1375,9 +1476,7 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
         "  * Sample well/boundary entries from structured budget records\n"
         "  This data is ALREADY EXTRACTED and present in your context — you do NOT need\n"
         "  to ask the user to run FloPy or extract data themselves.\n"
-        "- You can read .csv, .json, .txt, and any other text file in the workspace.\n"
-        "- You understand MODFLOW 6 file formats deeply: NAM, DIS/DISV/DISU, TDIS,\n"
-        "  IMS, NPF, STO, IC, OC, WEL, CHD, GHB, RIV, DRN, RCH, EVT, UZF, etc.\n\n"
+        "- You can read .csv, .json, .txt, and any other text file in the workspace.\n\n"
 
         "TOOLS:\n"
         "You have access to tools that you can call during the conversation:\n"
@@ -1427,39 +1526,8 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
         "  ![Description](/plots/run/output?inputs_dir=...&run_id=...&path=...)\n"
         "- If the plot fails, explain the error and try to fix the script.\n\n"
 
-        "QA/QC DIAGNOSTICS:\n"
-        "When the user asks about model quality, mass balance, dry cells, convergence,\n"
-        "pumping data issues, or any QA/QC analysis, use the run_qa_check tool.\n\n"
-        "Available checks:\n"
-        "- mass_balance: Parse listing file for volumetric budget, compute % discrepancy\n"
-        "  per stress period. Good balance: <0.5%, marginal: 0.5-1%, poor: >1%.\n"
-        "- dry_cells: Count cells with dry/inactive heads per layer and timestep.\n"
-        "  Reports spatial clusters and trends over time.\n"
-        "- convergence: Parse listing file for solver iteration counts and failures.\n"
-        "  Flags non-convergence and high iteration counts.\n"
-        "- pumping_summary: Analyze WEL package pumping rates by stress period.\n"
-        "  Detects anomalous rate jumps (>2x between consecutive periods).\n"
-        "- budget_timeseries: Extract IN/OUT per budget term across all timesteps.\n"
-        "  Shows temporal trends in the water budget.\n"
-        "- head_gradient: Compute cell-to-cell gradients per layer (final timestep).\n"
-        "  Flags extreme gradients that may indicate grid resolution issues.\n"
-        "- property_check: Check K, Kv/Kh, Ss, Sy ranges for unreasonable values.\n"
-        "  Detects layer inversions (deeper layer more permeable than expected).\n\n"
-        "For a comprehensive QA review, run multiple checks sequentially:\n"
-        "1. mass_balance (overall model health)\n"
-        "2. convergence (solver performance)\n"
-        "3. dry_cells (stability issues)\n"
-        "4. property_check (input data reasonableness)\n\n"
-        "QA/QC DOMAIN KNOWLEDGE:\n"
-        "- Hydraulic conductivity (K) typical ranges:\n"
-        "  * Gravel: 10-1000 m/d, Sand: 0.1-100 m/d, Silt: 1e-4 to 1 m/d\n"
-        "  * Clay: 1e-8 to 1e-3 m/d, Sandstone: 1e-4 to 10 m/d\n"
-        "- Kv/Kh ratio: typically 0.01-1.0 (vertical always less than horizontal)\n"
-        "- Specific storage (Ss): typically 1e-6 to 1e-4 per meter\n"
-        "- Specific yield (Sy): sand 0.15-0.30, gravel 0.20-0.35, clay 0.01-0.05\n"
-        "- Mass balance: <0.5% discrepancy is good, 0.5-1% needs attention, >1% is problematic\n"
-        "- Convergence: IMS outer iterations >50 suggest difficulty; non-convergence is critical\n"
-        "- Dry cells: >10% of a layer dry warrants investigation; growing dry zones are concerning\n\n"
+        # Simulator-specific knowledge (QA checks, domain thresholds, terminology)
+        f"{sim_knowledge}\n"
 
         "GEOGRAPHIC LOCATION AWARENESS:\n"
         "If a MODEL GEOGRAPHIC LOCATION section appears in the context below, it means\n"
@@ -1489,13 +1557,6 @@ def _build_system_prompt(ctx: Dict[str, Any], model_facts_text: str) -> str:
         "- For risky changes, ask the user to confirm before suggesting 'apply'.\n"
         "- Quick actions: validate | revalidate | suggest-fix | apply-fixes\n\n"
 
-        "MODFLOW 6 DOMAIN KNOWLEDGE:\n"
-        "- In WEL packages, a well with entries in multiple layers at the same (row,col)\n"
-        "  or (node) position represents a multi-screened well.\n"
-        "- Negative Q values = extraction (pumping), positive Q values = injection.\n"
-        "- PERIOD blocks define stress-period-specific data; PACKAGEDATA defines defaults.\n"
-        "- The .hds file contains computed heads per timestep; .cbc contains cell budgets.\n"
-        "- The .lst file contains the solver convergence history and water budget.\n"
         f"{pkg_section}"
         f"{facts_section}"
         f"{model_brief_section}\n"
@@ -1804,7 +1865,8 @@ def chat_reply(
                 plan = llm_route_read_plan(question=text, router_context=router_ctx, model=model)
                 if plan and isinstance(plan, dict):
                     extra_ctx = execute_read_plan(ws_root=ws_root, scan=scan, plan=plan,
-                                                  max_total_chars=200_000)
+                                                  max_total_chars=200_000,
+                                                  adapter=adapter)
                     # Audit trail: log what files were read
                     reads = extra_ctx.get("router_reads", []) if extra_ctx else []
                     budget = extra_ctx.get("router_read_budget", {}) if extra_ctx else {}

@@ -125,6 +125,19 @@ def detect_project(path: str) -> Tuple[DetectedType, Dict[str, Any]]:
     if mf6_ctx.get("namefiles") or mf6_ctx.get("mfsim") or mf6_ctx.get("package_files"):
         return ("mf6_workspace", mf6_ctx)
 
+    # Fall back to the simulator registry for non-MF6 simulators
+    try:
+        from gw.simulators.registry import detect_simulator
+        adapter = detect_simulator(p)
+        score = adapter.detect(p)
+        if score >= 0.3:
+            return (
+                f"{adapter.info().name}_workspace",
+                {"simulator": adapter.info().name, "confidence": score},
+            )
+    except Exception:
+        pass
+
     return ("unknown", {"reason": "no_project_markers"})
 
 

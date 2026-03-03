@@ -101,7 +101,7 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:8000",
         ],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
         max_age=3600,
     )
