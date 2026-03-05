@@ -57,48 +57,51 @@ GW Copilot automatically detects which simulator your model uses when you open a
 
 ## Screenshots
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="https://github.com/user-attachments/assets/33372016-26ec-4bec-b83e-e35077ef0d20" width="400" alt="Welcome Screen" /><br />
-      <b>Welcome Screen</b><br />
-      <sub>Select a model folder and configure your LLM provider to get started.</sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="https://github.com/user-attachments/assets/14eb9afa-26fd-4ef6-8194-5a64888ebeea" width="400" alt="LLM Settings" /><br />
-      <b>LLM Settings</b><br />
-      <sub>Configure your OpenAI or Anthropic API key and model preferences.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2">
-      <img src="https://github.com/user-attachments/assets/f99a4651-550a-4153-9bc0-76f4a42cfbe0" width="900" alt="Chat Assistant" /><br />
-      <b>Chat Assistant</b><br />
-      <sub>Ask questions in natural language — the AI reads your model files, runs diagnostics, and responds with grounded insights.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2">
-      <img src="https://github.com/user-attachments/assets/2146051c-164c-463f-88dd-c57682e8f8aa" width="900" alt="3D Viewer" /><br />
-      <b>3D Model Viewer</b><br />
-      <sub>Explore your model grid in 3D with interactive rotation, zoom, and layer visibility controls.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2">
-      <img src="https://github.com/user-attachments/assets/df27f5d5-52bf-4483-a3d4-43c32e15d1cc" width="900" alt="Model Files" /><br />
-      <b>Model File Explorer</b><br />
-      <sub>Browse and inspect all workspace files with simulator-aware descriptions and syntax-highlighted previews.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2">
-      <img src="https://github.com/user-attachments/assets/4095d2a2-2f5f-47e3-89cf-adc0d224d367" width="900" alt="Plot Generator" /><br />
-      <b>AI Plot Generator</b><br />
-      <sub>Describe the plot you want in plain English — the AI writes the Python script, executes it, and displays the result.</sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/33372016-26ec-4bec-b83e-e35077ef0d20" width="400" alt="Welcome Screen" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="https://github.com/user-attachments/assets/14eb9afa-26fd-4ef6-8194-5a64888ebeea" width="400" alt="LLM Settings" />
+</p>
+<p align="center">
+  <b>Welcome Screen</b> — Select a model folder to get started. &nbsp;|&nbsp; <b>LLM Settings</b> — Configure your OpenAI or Anthropic API key.
+</p>
+
+<br />
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/f99a4651-550a-4153-9bc0-76f4a42cfbe0" width="900" alt="Chat Assistant" />
+</p>
+<p align="center">
+  <b>Chat Assistant</b> — Ask questions in natural language. The AI reads your model files, runs diagnostics, and responds with grounded insights.
+</p>
+
+<br />
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/2146051c-164c-463f-88dd-c57682e8f8aa" width="900" alt="3D Viewer" />
+</p>
+<p align="center">
+  <b>3D Model Viewer</b> — Explore your model grid in 3D with interactive rotation, zoom, and layer visibility controls.
+</p>
+
+<br />
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/df27f5d5-52bf-4483-a3d4-43c32e15d1cc" width="900" alt="Model Files" />
+</p>
+<p align="center">
+  <b>Model File Explorer</b> — Browse and inspect all workspace files with simulator-aware descriptions and syntax-highlighted previews.
+</p>
+
+<br />
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/4095d2a2-2f5f-47e3-89cf-adc0d224d367" width="900" alt="Plot Generator" />
+</p>
+<p align="center">
+  <b>AI Plot Generator</b> — Describe the plot you want in plain English. The AI writes the Python script, executes it, and displays the result.
+</p>
+
 
 ## Architecture
 
@@ -236,3 +239,6 @@ Facts are automatically injected into the chat context so the LLM's responses ar
 | Model I/O | FloPy, NumPy, Pandas |
 | LLM Providers | OpenAI Responses API, Anthropic Messages API |
 | Plotting | Matplotlib (sandboxed subprocess) |
+
+
+
