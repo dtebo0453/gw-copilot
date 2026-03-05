@@ -157,7 +157,21 @@ def _plots_root(inputs_dir: str, workspace: Optional[str]) -> Path:
     return p
 
 
+def _validate_run_id(run_id: str) -> None:
+    """Reject run_id values that could escape the plots directory."""
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    norm = run_id.replace("\\", "/")
+    if "/" in norm or norm == ".." or norm.startswith(".."):
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    # run_id should be a simple directory name (typically a UUID or timestamp)
+    import re as _re
+    if not _re.match(r'^[\w\-\.]+$', run_id):
+        raise HTTPException(status_code=400, detail="run_id contains invalid characters")
+
+
 def _run_dir(inputs_dir: str, workspace: Optional[str], run_id: str) -> Path:
+    _validate_run_id(run_id)
     p = _plots_root(inputs_dir, workspace) / run_id
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -1421,7 +1435,14 @@ def read_cbc_term_timeseries(workspace_root: str, *, cbc_rel: str, term: str = '
     except Exception as e:
         raise RuntimeError(f"FloPy is required to read CBC budgets (pip install flopy). {e}")
 
-    cbc_path = os.path.join(workspace_root, cbc_rel)
+    # Validate cbc_rel to prevent path traversal
+    rel_parts = cbc_rel.replace("\\", "/").split("/")
+    if any(part == ".." for part in rel_parts):
+        raise ValueError(f"path traversal not allowed in cbc_rel: {cbc_rel}")
+    cbc_path = os.path.normpath(os.path.join(workspace_root, cbc_rel))
+    # Ensure resolved path stays inside workspace
+    if not cbc_path.startswith(os.path.normpath(workspace_root)):
+        raise ValueError(f"cbc_rel escapes workspace root: {cbc_rel}")
     if not os.path.exists(cbc_path):
         raise FileNotFoundError(cbc_path)
 
@@ -2741,6 +2762,7 @@ def plots_runs(inputs_dir: str, workspace: Optional[str] = None, max: int = 50):
 @router.get("/plots/run/detail")
 def plots_run_detail(inputs_dir: str, run_id: str, workspace: Optional[str] = None):
     """Return full detail for a single run: prompt, script, stdout, stderr, exit_code, outputs."""
+    _validate_run_id(run_id)
     root = _plots_root(inputs_dir, workspace)
     run_dir = root / run_id
     if not run_dir.exists() or not run_dir.is_dir():
@@ -2828,6 +2850,7 @@ def plots_run_detail(inputs_dir: str, run_id: str, workspace: Optional[str] = No
 @router.delete("/plots/run/{run_id}")
 def plots_run_delete(run_id: str, inputs_dir: str, workspace: Optional[str] = None):
     """Delete a single run directory."""
+    _validate_run_id(run_id)
     root = _plots_root(inputs_dir, workspace)
     run_dir = root / run_id
     if not run_dir.exists() or not run_dir.is_dir():
@@ -2846,31 +2869,49 @@ def plots_run_output(inputs_dir: str, run_id: str, path: str, workspace: Optiona
       - a relative filename (just the basename)
     The file must reside inside the run output directory.
     """
+    _validate_run_id(run_id)
     root = _plots_root(inputs_dir, workspace)
     run_dir = root / run_id
     if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+
+    run_dir_resolved = run_dir.resolve()
 
     # Accept absolute path (from run response) or just a filename
     requested = Path(path)
     if requested.is_absolute():
         # Verify the file is inside the run dir
         try:
-            requested.resolve().relative_to(run_dir.resolve())
+            requested.resolve().relative_to(run_dir_resolved)
         except ValueError:
-            # Fallback: use just the filename within the run dir
+            # Fallback: use just the basename within the run dir
             requested = run_dir / requested.name
     else:
-        # Relative path / bare filename
+        # Block traversal in relative paths
+        rel_parts = path.replace("\\", "/").split("/")
+        if any(part == ".." for part in rel_parts):
+            raise HTTPException(status_code=400, detail="path traversal is not allowed")
         requested = run_dir / requested
 
     resolved = requested.resolve()
+
+    # Final containment check: resolved path must be inside run_dir
+    try:
+        resolved.relative_to(run_dir_resolved)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="path escapes run directory")
+
     if not resolved.exists() or not resolved.is_file():
-        # One more fallback: search for the filename anywhere in the run dir
+        # One more fallback: search for the filename in the run dir
         fname = Path(path).name
         found = list(run_dir.rglob(fname))
         if found:
             resolved = found[0].resolve()
+            # Verify the found file is still inside run_dir
+            try:
+                resolved.relative_to(run_dir_resolved)
+            except ValueError:
+                raise HTTPException(status_code=403, detail="path escapes run directory")
         else:
             raise HTTPException(status_code=404, detail=f"output file not found: {fname}")
 
@@ -2885,6 +2926,7 @@ def plots_run_output(inputs_dir: str, run_id: str, path: str, workspace: Optiona
 
 @router.get("/plots/run/download")
 def plots_run_download(inputs_dir: str, run_id: str, workspace: Optional[str] = None):
+    _validate_run_id(run_id)
     root = _plots_root(inputs_dir, workspace)
     run_dir = root / run_id
     if not run_dir.exists() or not run_dir.is_dir():

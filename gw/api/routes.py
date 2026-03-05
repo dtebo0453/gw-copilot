@@ -613,9 +613,29 @@ def job_events(job_id: str):
 
 @router.get("/artifacts/read")
 def read_artifact(path: str):
-    p = Path(path)
+    """Read an artifact file.
+
+    The resolved path must reside under a GW_Copilot/ or run_artifacts/
+    directory to prevent arbitrary file reads.
+    """
+    # Block obvious traversal patterns
+    norm = path.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    if any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="path traversal is not allowed")
+
+    p = Path(path).resolve()
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
+
+    # Verify the file lives inside a known artifacts directory
+    p_parts = p.parts
+    allowed_parents = ("GW_Copilot", "run_artifacts")
+    if not any(ap in p_parts for ap in allowed_parents):
+        raise HTTPException(
+            status_code=403,
+            detail="artifact path must be inside a GW_Copilot or run_artifacts directory",
+        )
     return PlainTextResponse(p.read_text(encoding="utf-8", errors="replace"))
 
 
