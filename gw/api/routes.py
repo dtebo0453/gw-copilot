@@ -735,6 +735,7 @@ def debug_location_context(inputs_dir: str):
     Returns the full diagnostic chain for location context loading.
     """
     import traceback
+    wf.sanitize_inputs_dir(inputs_dir)
     result: dict = {"inputs_dir": inputs_dir, "steps": []}
 
     # Step 1: Check config path

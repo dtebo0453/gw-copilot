@@ -244,8 +244,14 @@ def suggest_fix_plan(
         )
 
     files = []
-    if inputs_dir and Path(inputs_dir).exists():
-        files = sorted([p.name for p in Path(inputs_dir).iterdir() if p.is_file()])
+    if inputs_dir:
+        try:
+            from gw.api.workspace_files import sanitize_inputs_dir
+            sanitize_inputs_dir(inputs_dir)
+        except (ImportError, ValueError):
+            pass
+        if Path(inputs_dir).exists():
+            files = sorted([p.name for p in Path(inputs_dir).iterdir() if p.is_file()])
 
     context: Dict[str, Any] = {
         "base_config": base_cfg,

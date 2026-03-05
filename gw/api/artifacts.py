@@ -8,12 +8,15 @@ from typing import Optional, List
 # workspace file browsing, and to avoid returning drive-qualified absolute paths
 # (e.g. C:\\...) back to the UI where they may be rejected.
 try:
-    from gw.api.workspace_files import resolve_workspace_root
+    from gw.api.workspace_files import resolve_workspace_root, sanitize_inputs_dir
 except Exception:  # pragma: no cover
     resolve_workspace_root = None  # type: ignore
+    def sanitize_inputs_dir(x: str) -> str:  # type: ignore
+        return x
 
 def _has_gw_copilot(inputs_dir: str) -> bool:
     """Check if inputs_dir has a GW_Copilot/ subfolder with config.json."""
+    sanitize_inputs_dir(inputs_dir)
     return (Path(inputs_dir) / "GW_Copilot" / "config.json").exists()
 
 

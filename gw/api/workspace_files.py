@@ -35,6 +35,30 @@ def _is_path_under(child: Path, parent: Path) -> bool:
         return False
 
 
+def sanitize_inputs_dir(inputs_dir: str) -> str:
+    """Validate and return a sanitized inputs_dir string.
+
+    This is a lightweight check that blocks obvious traversal and injection
+    patterns *before* the value is used in ``Path()`` or ``os.path.join()``.
+    It does NOT resolve the path or check existence — that is left to
+    ``resolve_workspace_root()``.
+
+    Raises ``ValueError`` if the value looks malicious.
+    """
+    raw = (inputs_dir or "").strip()
+    if not raw:
+        raise ValueError("inputs_dir is required")
+    norm = raw.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    if any(part == ".." for part in parts):
+        raise ValueError("path traversal (..) is not allowed in inputs_dir")
+    # Block shell meta-characters that have no business in a directory path
+    _bad = set(";|&$`")
+    if any(ch in raw for ch in _bad):
+        raise ValueError("inputs_dir contains invalid characters")
+    return raw
+
+
 def _deny_traversal(path_rel: str) -> None:
     if not path_rel or path_rel.strip() == "":
         raise ValueError("path_rel is required")

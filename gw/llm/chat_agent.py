@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-from gw.api.workspace_files import resolve_workspace_root, read_file_text, list_workspace_files
+from gw.api.workspace_files import resolve_workspace_root, read_file_text, list_workspace_files, sanitize_inputs_dir
 from gw.api.workspace_scan import ensure_workspace_scan
 from gw.api.workspace_state import update_workspace_state, workspace_state_summary, load_workspace_state
 from gw.llm.docs_retriever import search_docs
@@ -700,6 +700,11 @@ def _read_project_context(inputs_dir: Optional[str]) -> Dict[str, Any]:
     if not inputs_dir:
         return ctx
 
+    try:
+        sanitize_inputs_dir(inputs_dir)
+    except ValueError:
+        return ctx
+
     base = Path(inputs_dir)
     if not base.exists():
         return ctx
@@ -925,6 +930,11 @@ def _try_compute_location_from_config(inputs_dir: str) -> Optional[Dict[str, Any
     geographic region identification even without the full grid extent).
     """
     import math as _math
+
+    try:
+        sanitize_inputs_dir(inputs_dir)
+    except ValueError:
+        return None
 
     # Find config
     for candidate in [
@@ -1805,6 +1815,7 @@ def chat_reply(
         ws = workspace
         if not ws:
             try:
+                sanitize_inputs_dir(inputs_dir)
                 ws = str((json.loads((Path(inputs_dir) / "config.json").read_text(encoding="utf-8")).get("workspace")) or "")
             except Exception:
                 ws = workspace

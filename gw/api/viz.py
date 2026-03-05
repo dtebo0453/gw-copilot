@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from gw.api.workspace_files import resolve_workspace_root
+from gw.api.workspace_files import resolve_workspace_root, sanitize_inputs_dir
 from gw.api.model_session import ModelSessionCache
 from gw.llm.mf6_filetype_knowledge import (
     PACKAGE_PROPERTIES,
@@ -1892,6 +1892,7 @@ class SpatialRefPayload(BaseModel):
 
 def _gw_copilot_config_path(inputs_dir: str) -> Optional[Path]:
     """Return the path to GW_Copilot/config.json if it exists."""
+    sanitize_inputs_dir(inputs_dir)
     p = Path(inputs_dir)
     cfg = p / "GW_Copilot" / "config.json"
     if cfg.exists():
@@ -1901,7 +1902,7 @@ def _gw_copilot_config_path(inputs_dir: str) -> Optional[Path]:
 
 def _load_spatial_ref(inputs_dir: str) -> Optional[Dict[str, Any]]:
     """Load user-defined spatial reference from GW_Copilot/config.json."""
-    cfg_path = _gw_copilot_config_path(inputs_dir)
+    cfg_path = _gw_copilot_config_path(inputs_dir)  # validates inputs_dir
     if cfg_path is None:
         return None
     try:
@@ -1913,6 +1914,7 @@ def _load_spatial_ref(inputs_dir: str) -> Optional[Dict[str, Any]]:
 
 def _save_spatial_ref(inputs_dir: str, ref: Dict[str, Any]) -> None:
     """Save user-defined spatial reference into GW_Copilot/config.json."""
+    sanitize_inputs_dir(inputs_dir)
     p = Path(inputs_dir)
     gw_dir = p / "GW_Copilot"
     gw_dir.mkdir(exist_ok=True)
@@ -1930,6 +1932,7 @@ def _save_spatial_ref(inputs_dir: str, ref: Dict[str, Any]) -> None:
 
 def _save_location_context(inputs_dir: str, loc: Dict[str, Any]) -> None:
     """Save location context (centroid lat/lon) into GW_Copilot/config.json."""
+    sanitize_inputs_dir(inputs_dir)
     p = Path(inputs_dir)
     gw_dir = p / "GW_Copilot"
     gw_dir.mkdir(exist_ok=True)
@@ -2333,8 +2336,14 @@ def load_location_context(inputs_dir: str) -> Optional[Dict[str, Any]]:
         logger.debug("load_location_context: no inputs_dir")
         return None
 
+    try:
+        sanitize_inputs_dir(inputs_dir)
+    except ValueError:
+        logger.warning("load_location_context: invalid inputs_dir: %s", inputs_dir)
+        return None
+
     # Find config file
-    cfg_path = _gw_copilot_config_path(inputs_dir)
+    cfg_path = _gw_copilot_config_path(inputs_dir)  # validates inputs_dir
     if cfg_path is None:
         parent = Path(inputs_dir).parent
         if parent != Path(inputs_dir):

@@ -32,7 +32,7 @@ the Model Files tab but the Q&A index is empty because it is pointing at a
 different directory.
 """
 
-from gw.api.workspace_files import resolve_workspace_root
+from gw.api.workspace_files import resolve_workspace_root, sanitize_inputs_dir
 from gw.api.workspace_scan import ensure_workspace_scan
 from gw.llm.read_router import llm_route_read_plan, execute_read_plan
 from gw.api.workspace_state import load_workspace_state, workspace_state_summary
@@ -143,6 +143,7 @@ def _write_json(path: Path, obj: Any) -> None:
 
 
 def _plots_root(inputs_dir: str, workspace: Optional[str]) -> Path:
+    sanitize_inputs_dir(inputs_dir)
     # GW_Copilot layout: plots go into <inputs_dir>/GW_Copilot/plots/
     gw_copilot_cfg = Path(inputs_dir) / "GW_Copilot" / "config.json"
     if gw_copilot_cfg.exists():
